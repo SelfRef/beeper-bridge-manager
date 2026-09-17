@@ -99,10 +99,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # :latest          moving, newest build
-      # :sha-<7>         the recipe (this repo) that produced it
-      # :base-<digest12> which bridge-manager base it was built on
-      # :<YYYYMMDD>      scheduled builds
+      # :latest is the only published tag; the base image a build used is
+      # recorded in the labels below rather than in a tag.
+      #
+      # :pr-<n> exists only so pull-request builds have a name for the smoke
+      # test to run against — those builds never push.
       - name: Image metadata
         id: meta
         uses: docker/metadata-action@v6
@@ -110,9 +111,7 @@ jobs:
           images: ${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=short,enable={{is_default_branch}}
-            type=raw,value=base-${{ steps.base.outputs.short }},enable={{is_default_branch}}
-            type=schedule,pattern={{date 'YYYYMMDD'}}
+            type=ref,event=pr
           labels: |
             org.opencontainers.image.title=beeper-bridge-manager-docker
             org.opencontainers.image.description=Beeper bridge-manager with supervisord — several self-hosted bridges in one container

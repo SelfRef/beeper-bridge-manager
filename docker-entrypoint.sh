@@ -35,6 +35,17 @@
 # turns off bbctl's update check, which is what keeps the patched binary in
 # place. Bridges with no patched binary are left completely untouched, and with
 # the switch off the image behaves exactly like the unpatched one.
+#
+# Three independent markers, each off when its value is empty:
+#   KEEP_DELETED_MARKER         reaction on the kept message. UNSET means the
+#                               bridge default (a wastebasket); set-but-EMPTY
+#                               means no reaction at all
+#   KEEP_DELETED_NOTICE         text of one m.notice replying to the message
+#   KEEP_DELETED_NOTICE_SIDE    whose side it appears on: self (default, needs
+#                               double puppeting) or sender
+# These are exported to supervisord rather than written into `environment=`
+# lines, because supervisord runs %(...)s expansion over that field and these
+# hold arbitrary operator text — a literal % would break the config file.
 set -eu
 
 # /etc/supervisord.conf is supervisorctl's default search path, so writing it
@@ -47,12 +58,27 @@ START_SECS=${BRIDGE_START_SECS:-30}
 STOP_WAIT_SECS=${BRIDGE_STOP_WAIT_SECS:-30}
 PATCHED_DIR=${PATCHED_BRIDGES_DIR:-/opt/patched-bridges}
 KEEP_DELETED=${KEEP_DELETED_MESSAGES:-}
-KEEP_DELETED_MARKER=${KEEP_DELETED_MARKER:-}
 
 case "$KEEP_DELETED" in
 	1 | true | TRUE | True | yes | on) KEEP_DELETED=true ;;
 	*) KEEP_DELETED= ;;
 esac
+
+# Marker: distinguish UNSET (use the bridge's default) from SET-BUT-EMPTY (no
+# reaction). ${VAR+x} is the only portable way to tell those apart.
+MARKER_IS_SET=${KEEP_DELETED_MARKER+set}
+
+if [ -n "$KEEP_DELETED" ]; then
+	if [ -n "$MARKER_IS_SET" ]; then
+		export BRIDGE_KEEP_DELETED_MARKER="${KEEP_DELETED_MARKER}"
+	fi
+	if [ -n "${KEEP_DELETED_NOTICE:-}" ]; then
+		export BRIDGE_KEEP_DELETED_NOTICE="${KEEP_DELETED_NOTICE}"
+		if [ -n "${KEEP_DELETED_NOTICE_SIDE:-}" ]; then
+			export BRIDGE_KEEP_DELETED_NOTICE_SIDE="${KEEP_DELETED_NOTICE_SIDE}"
+		fi
+	fi
+fi
 
 if [ -z "${BRIDGES:-}" ]; then
 	echo "BRIDGES is not set — nothing to run." >&2
@@ -108,9 +134,6 @@ for entry in $(echo "$BRIDGES" | tr ',' ' '); do
 		if [ -n "$KEEP_DELETED" ] && [ -x "$binary" ]; then
 			printf ',BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND="%s"' "$binary"
 			printf ',BRIDGE_KEEP_DELETED_MESSAGES="true"'
-			if [ -n "$KEEP_DELETED_MARKER" ]; then
-				printf ',BRIDGE_KEEP_DELETED_MARKER="%s"' "$KEEP_DELETED_MARKER"
-			fi
 			patched=$((patched + 1))
 		fi
 		printf '\n'
@@ -136,6 +159,14 @@ if [ -n "$KEEP_DELETED" ]; then
 	echo "keep-deleted: ${patched}/${count} bridge(s) running a patched binary" >&2
 	if [ "$patched" -eq 0 ]; then
 		echo "keep-deleted: WARNING - no patched binary matched any bridge type in ${PATCHED_DIR}" >&2
+	fi
+	if [ -n "$MARKER_IS_SET" ] && [ -z "${KEEP_DELETED_MARKER}" ]; then
+		echo "keep-deleted: marker disabled (KEEP_DELETED_MARKER is set but empty)" >&2
+	else
+		echo "keep-deleted: marker ${BRIDGE_KEEP_DELETED_MARKER:-(bridge default)}" >&2
+	fi
+	if [ -n "${KEEP_DELETED_NOTICE:-}" ]; then
+		echo "keep-deleted: notice on the ${KEEP_DELETED_NOTICE_SIDE:-self} side" >&2
 	fi
 fi
 

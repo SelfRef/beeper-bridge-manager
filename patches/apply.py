@@ -34,7 +34,7 @@ BRIDGEV2_ANCHOR = re.compile(
 
 BRIDGEV2_GUARD = """{indent}// PATCH keep-deleted: mark the message instead of redacting it.
 {indent}if keepDeletedMessages {{
-{indent}\treturn portal.markRemovedMessageParts(ctx, targetParts, intent, getEventTS(evt))
+{indent}\treturn portal.markRemovedMessageParts(ctx, targetParts, intent, source, getEventTS(evt))
 {indent}}}
 """
 

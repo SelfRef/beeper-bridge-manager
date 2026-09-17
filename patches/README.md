@@ -13,11 +13,14 @@ Runtime switch, read once at bridge start:
 | Variable | Default | Effect |
 |---|---|---|
 | `BRIDGE_KEEP_DELETED_MESSAGES` | unset | `true` enables the behaviour; anything else is stock upstream |
-| `BRIDGE_KEEP_DELETED_MARKER` | `🗑️` | Reaction key used as the marker |
+| `BRIDGE_KEEP_DELETED_MARKER` | `🗑️` | Reaction key. Read with `LookupEnv`: **unset** = default, **set-but-empty** = no reaction |
+| `BRIDGE_KEEP_DELETED_NOTICE` | unset | Body of one `m.notice` replying to the kept message |
+| `BRIDGE_KEEP_DELETED_NOTICE_SIDE` | `self` | `self` (local user via double puppeting) or `sender` (the deleting party). Unknown values warn and fall back to `self` |
 
-The container-level knobs are `KEEP_DELETED_MESSAGES` / `KEEP_DELETED_MARKER`;
-the entrypoint translates them into the `BRIDGE_*` variables above, and only
-for bridges that actually have a patched binary.
+The container-level knobs drop the `BRIDGE_` prefix; the entrypoint translates
+them. The master switch is set per program, and only for bridges that actually
+have a patched binary; the marker and notice values are exported globally
+instead, because supervisord expands `%(...)s` in `environment=` lines.
 
 ### Files
 
@@ -62,5 +65,8 @@ still resolve afterwards.
 If a build fails with `FATAL: expected exactly 1 … anchor`, upstream moved the
 code. Look at the function named in the table above, update the regex in
 `apply.py`, and check that the helper still compiles against the new API — the
-helper uses `intent.SendMessage`, `event.ReactionEventContent` and
-`MatrixSendExtra`, which have been stable across v0.28–v0.31.
+helper uses `intent.SendMessage`, `event.ReactionEventContent`,
+`event.MessageEventContent`, `event.RelatesTo.InReplyTo`, `MatrixSendExtra` and
+`(*UserLogin).User.DoublePuppet`, all of which are identical in v0.28 and
+v0.31. Note the bridgev2 guard passes `source` as well as `intent`, because the
+self notice needs the local user's double puppet.

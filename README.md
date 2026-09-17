@@ -12,16 +12,15 @@ This image adds `supervisord` on top of Beeper's, so one container runs as many 
 docker pull ghcr.io/selfref/beeper-bridge-manager-docker:latest
 ```
 
-| Tag | Meaning |
-|---|---|
-| `latest` | moving: newest build |
-| `sha-<7>` | the recipe (this repo) that produced the image |
-| `base-<digest12>` | which `bridge-manager` base it was built on |
-| `<YYYYMMDD>` | scheduled builds |
+`latest` is the only tag: moving, newest build. Labels
+`dev.selfref.bridgemanager.base` / `.base_digest` record the exact base image
+each build used.
 
-Labels `dev.selfref.bridgemanager.base` / `.base_digest` record the exact base image.
-
-Rebuilt weekly ([workflow](.github/workflows/build.yml)) to pick up base-image updates, and on every change to the Dockerfile or entrypoint. The bridge **binaries** are not in the image — `bbctl` downloads them at container start — so bridges update on restart without a rebuild.
+Rebuilt weekly ([workflow](.github/workflows/build.yml)) to pick up base-image
+updates, and on every change to the Dockerfile, entrypoint or patches. Note the
+weekly rebuild is also what updates the **patched** bridge binaries in
+`/opt/patched-bridges` — those are compiled here, not downloaded at container
+start. Bridges without a patched binary still update on restart via `bbctl`.
 
 ## Usage
 
@@ -64,7 +63,9 @@ Every bridge is an appservice using a websocket to Beeper's server, so no ports 
 | `BRIDGE_START_SECS` | `30` | supervisord `startsecs` |
 | `BRIDGE_STOP_WAIT_SECS` | `30` | supervisord `stopwaitsecs` |
 | `KEEP_DELETED_MESSAGES` | unset | `true`/`1`/`yes`/`on` — keep remotely deleted messages and mark them instead. See below |
-| `KEEP_DELETED_MARKER` | `🗑️` | Reaction used as the deletion marker |
+| `KEEP_DELETED_MARKER` | `🗑️` | Reaction used as the deletion marker. **Set it to empty for no reaction** |
+| `KEEP_DELETED_NOTICE` | unset | Fixed text for one notice replying to the kept message. Empty = off |
+| `KEEP_DELETED_NOTICE_SIDE` | `self` | Whose side that notice appears on: `self` or `sender` |
 | `PATCHED_BRIDGES_DIR` | `/opt/patched-bridges` | Where the patched binaries live in the image |
 | `GENERATE_ONLY` | unset | Print the generated supervisord config and exit, without starting anything |
 
@@ -104,7 +105,7 @@ content server-side and irreversibly, and the bridge drops its own database
 rows too, so the message is gone from your archive as well as from the chat.
 
 This image ships patched bridge binaries that can instead leave the message
-intact and add a single 🗑️ reaction to it:
+intact and mark it:
 
 ```yaml
 environment:
@@ -113,6 +114,47 @@ environment:
 
 Off by default. With the switch off the image behaves exactly like the
 unpatched one, down to using bbctl's own downloaded binaries.
+
+### The two markers
+
+Independent, and each is off when its value is empty. Either, both, or neither
+— with neither, the message is simply kept, silently.
+
+**A reaction on the message**, via `KEEP_DELETED_MARKER`. **Unset** means the
+default 🗑️; **set but empty** means no reaction at all.
+
+**One notice replying to the message**, via `KEEP_DELETED_NOTICE` (the text,
+fixed — no templating) and `KEEP_DELETED_NOTICE_SIDE`, which picks who it is
+sent as:
+
+| Side | Sent as | Renders |
+|---|---|---|
+| `self` (default) | your own Matrix user, via double puppeting | on your side |
+| `sender` | the party who deleted the message | on their side |
+
+There is deliberately only one notice — picking a side is the whole choice. If
+`self` is asked for and double puppeting is unavailable, the notice is skipped
+with a warning. `KEEP_DELETED_NOTICE_SIDE` on its own, with no
+`KEEP_DELETED_NOTICE`, does nothing.
+
+```yaml
+environment:
+  KEEP_DELETED_MESSAGES: "true"
+  KEEP_DELETED_MARKER: ""                        # no reaction
+  KEEP_DELETED_NOTICE: "deleted this message"
+  KEEP_DELETED_NOTICE_SIDE: "sender"
+```
+
+**Nothing here reaches the remote network.** The other person sees no reaction
+and no notice; this is entirely a change to your own copy of the conversation.
+mautrix stamps double-puppeted events with `fi.mau.double_puppet_source` and
+`Connector.shouldIgnoreEvent` drops them on the way back in, so even the
+notice sent as you cannot be relayed outward.
+
+The marker and notice values are exported into supervisord's environment
+rather than written into per-program `environment=` lines, because supervisord
+runs `%(...)s` expansion over that field and these hold arbitrary text — a
+literal `%` in a notice would otherwise break the config file.
 
 ### How it works
 
@@ -146,10 +188,10 @@ Two code sites, because the bridges do not share one deletion path:
 | `bridgev2` (every bridge except Discord) | `bridgev2/portal.go` in mautrix-go | `Portal.handleRemoteMessageRemove` |
 | Discord (still bridgev1) | `portal.go` in mautrix-discord | `Portal.redactAllParts` |
 
-In both, a guard is inserted before the redaction: if the switch is on, react
-to the first part of the message and return, leaving the Matrix events *and*
-the bridge's database rows in place so replies and edits still resolve. Only
-the first part is marked — one deletion produces one marker, not one per
+In both, a guard is inserted before the redaction: if the switch is on, mark
+the first part of the message and return, leaving the Matrix events *and* the
+bridge's database rows in place so replies and edits still resolve. Only the
+first part is marked — one deletion produces one set of markers, not one per
 attachment.
 
 The patcher (`patches/apply.py`) matches its anchors with regexes that tolerate
@@ -163,8 +205,10 @@ until the first deletion.
   elsewhere stays readable in Beeper. That is the point, but it is also a
   privacy decision about other people's messages — make it knowingly.
 - The dim, centred "deleted" placeholder is a client-side rendering of a
-  redaction. Once you stop redacting you get a reaction chip instead; there is
-  no way to get the dim style in a normal chat room.
+  redaction. Once you stop redacting you get a reaction chip and/or a notice
+  bubble instead; there is no way to get the dim style in a normal chat room.
+- A connector that reports the same deletion twice would produce duplicate
+  markers. Upstream has the same shape of problem; there is no dedup here.
 - These are your own builds of the bridges, from `mautrix/<bridge>` main. They
   update when this image is rebuilt (weekly), not when bbctl next starts.
 
