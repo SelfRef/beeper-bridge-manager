@@ -25,6 +25,16 @@
 # BEEPER_BRIDGE_* flags such as BEEPER_BRIDGE_NO_OVERRIDE_CONFIG) is inherited
 # from the container environment by every program, so it is set once on the
 # container rather than repeated per bridge.
+#
+# Patched bridges: when KEEP_DELETED_MESSAGES is truthy AND the image carries a
+# patched binary for a bridge's type (/opt/patched-bridges/mautrix-<type>), that
+# program additionally gets
+#   BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND=<that binary>
+#   BRIDGE_KEEP_DELETED_MESSAGES=true
+# so bbctl runs our build instead of downloading the stock one. That flag also
+# turns off bbctl's update check, which is what keeps the patched binary in
+# place. Bridges with no patched binary are left completely untouched, and with
+# the switch off the image behaves exactly like the unpatched one.
 set -eu
 
 # /etc/supervisord.conf is supervisorctl's default search path, so writing it
@@ -35,6 +45,14 @@ BRIDGE_PREFIX=${BRIDGE_PREFIX:-sh-}
 DATA_DIR=${DATA_DIR:-/data}
 START_SECS=${BRIDGE_START_SECS:-30}
 STOP_WAIT_SECS=${BRIDGE_STOP_WAIT_SECS:-30}
+PATCHED_DIR=${PATCHED_BRIDGES_DIR:-/opt/patched-bridges}
+KEEP_DELETED=${KEEP_DELETED_MESSAGES:-}
+KEEP_DELETED_MARKER=${KEEP_DELETED_MARKER:-}
+
+case "$KEEP_DELETED" in
+	1 | true | TRUE | True | yes | on) KEEP_DELETED=true ;;
+	*) KEEP_DELETED= ;;
+esac
 
 if [ -z "${BRIDGES:-}" ]; then
 	echo "BRIDGES is not set — nothing to run." >&2
@@ -62,6 +80,7 @@ serverurl=unix:///tmp/supervisor.sock
 CONFEOF
 
 count=0
+patched=0
 for entry in $(echo "$BRIDGES" | tr ',' ' '); do
 	name=${entry%%:*}
 	type=${entry#"$name"}
@@ -79,8 +98,22 @@ for entry in $(echo "$BRIDGES" | tr ',' ' '); do
 		# mkdir here (not at image build) because \$DATA_DIR is a volume.
 		echo "command=/bin/sh -c 'mkdir -p ${DATA_DIR}/bbctl && exec /usr/local/bin/run-bridge.sh'"
 		printf 'environment=BRIDGE_NAME="%s%s"' "$BRIDGE_PREFIX" "$name"
-		[ -n "$type" ] && printf ',BEEPER_BRIDGE_TYPE="%s"' "$type"
-		printf ',BBCTL_CONFIG="%s/bbctl/%s.json"\n' "$DATA_DIR" "$name"
+		if [ -n "$type" ]; then
+			printf ',BEEPER_BRIDGE_TYPE="%s"' "$type"
+		fi
+		printf ',BBCTL_CONFIG="%s/bbctl/%s.json"' "$DATA_DIR" "$name"
+		# bbctl names bridge binaries mautrix-<type>; fall back to the bridge
+		# name when no type was given (bbctl would then guess the same way).
+		binary="${PATCHED_DIR}/mautrix-${type:-$name}"
+		if [ -n "$KEEP_DELETED" ] && [ -x "$binary" ]; then
+			printf ',BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND="%s"' "$binary"
+			printf ',BRIDGE_KEEP_DELETED_MESSAGES="true"'
+			if [ -n "$KEEP_DELETED_MARKER" ]; then
+				printf ',BRIDGE_KEEP_DELETED_MARKER="%s"' "$KEEP_DELETED_MARKER"
+			fi
+			patched=$((patched + 1))
+		fi
+		printf '\n'
 		echo "autostart=true"
 		echo "autorestart=true"
 		echo "startsecs=${START_SECS}"
@@ -99,6 +132,12 @@ for entry in $(echo "$BRIDGES" | tr ',' ' '); do
 done
 
 echo "Configured ${count} bridge(s) from \$BRIDGES" >&2
+if [ -n "$KEEP_DELETED" ]; then
+	echo "keep-deleted: ${patched}/${count} bridge(s) running a patched binary" >&2
+	if [ "$patched" -eq 0 ]; then
+		echo "keep-deleted: WARNING - no patched binary matched any bridge type in ${PATCHED_DIR}" >&2
+	fi
+fi
 
 # Print the generated config and exit — for testing, without starting anything.
 if [ -n "${GENERATE_ONLY:-}" ]; then

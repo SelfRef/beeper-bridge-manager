@@ -5,10 +5,14 @@ name: Build image
 # several bridges (see README.md).
 #
 # The base image (ghcr.io/beeper/bridge-manager:latest) is rebuilt by Beeper
-# whenever bbctl changes, and this image is a thin layer on top, so the weekly
-# schedule exists to pick up those base updates. Note the bridge BINARIES are
-# not in the image at all — bbctl downloads them at container start, so bridge
-# updates do not need a rebuild.
+# whenever bbctl changes, so the weekly schedule picks up those base updates.
+#
+# Since the keep-deleted patch was added the image ALSO compiles patched bridge
+# binaries from mautrix/<bridge> main (see patches/ and build-bridges.sh), so
+# the weekly run is now what keeps those bridges current too — they are no
+# longer downloaded fresh at container start. That makes the build long:
+# mautrix-signal pulls in libsignal, a large Rust dependency, and is most of
+# the wall clock. Use `signal_stage: signal-none` on a manual run to skip it.
 
 on:
   push:
@@ -16,11 +20,15 @@ on:
     paths:
       - Dockerfile
       - docker-entrypoint.sh
+      - build-bridges.sh
+      - patches/**
       - .github/workflows/build.yml
   pull_request:
     paths:
       - Dockerfile
       - docker-entrypoint.sh
+      - build-bridges.sh
+      - patches/**
       - .github/workflows/build.yml
   schedule:
     # Weekly, Monday. Offset from the other selfref image builds so the
@@ -32,6 +40,10 @@ on:
         description: "Base image to build on (repo:tag or repo@sha256:...); empty = ghcr.io/beeper/bridge-manager:latest"
         required: false
         default: ""
+      signal_stage:
+        description: "signal-build (default) or signal-none to skip the Rust libsignal build"
+        required: false
+        default: "signal-build"
 
 concurrency:
   group: build-${{ github.ref }}
@@ -40,7 +52,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write
@@ -112,7 +124,13 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          build-args: BASE_IMAGE=${{ steps.base.outputs.pinned }}
+          build-args: |
+            BASE_IMAGE=${{ steps.base.outputs.pinned }}
+            SIGNAL_STAGE=${{ inputs.signal_stage || 'signal-build' }}
+          # Load it locally as well so the smoke test below can exercise the
+          # real image instead of rebuilding it (the bridge builds are slow,
+          # and a plain `docker build` would not reuse the GHA cache).
+          load: true
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -122,19 +140,56 @@ jobs:
       # The image is only useful if the entrypoint can turn $BRIDGES into a
       # supervisord config, so assert that rather than just that it builds.
       - name: Smoke test entrypoint
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
-          docker build --build-arg "BASE_IMAGE=${{ steps.base.outputs.pinned }}" -t bbm-test .
-          out="$(docker run --rm -e GENERATE_ONLY=1 -e BRIDGES="alpha,beta:signal" bbm-test)"
+          # The image was loaded by the build step above; take the first tag.
+          IMG="$(echo "$TAGS" | head -n1)"
+          [ -n "$IMG" ] || { echo "::error::no tag to test"; exit 1; }
+          echo "testing ${IMG}"
+          docker image inspect "$IMG" >/dev/null
+
+          # The patched binaries are the reason this build is slow, so assert
+          # they are present and actually carry the patch, not just that the
+          # image exists. A silently unpatched binary looks identical until
+          # the first deletion.
+          docker run --rm --entrypoint /bin/sh "$IMG" -c '
+            set -eu
+            n=0
+            for b in /opt/patched-bridges/mautrix-*; do
+              [ -f "$b" ] || continue
+              strings "$b" | grep -q BRIDGE_KEEP_DELETED_MESSAGES \
+                || { echo "UNPATCHED: $b"; exit 1; }
+              echo "patched: $(basename "$b")"
+              n=$((n + 1))
+            done
+            [ "$n" -gt 0 ] || { echo "no patched binaries in image"; exit 1; }
+            echo "$n patched binaries"
+          ' || { echo "::error::patched binary check failed"; exit 1; }
+
+          out="$(docker run --rm -e GENERATE_ONLY=1 -e BRIDGES="alpha,beta:signal" "$IMG")"
           echo "$out"
           echo "$out" | grep -q '^\[program:alpha\]'                || { echo "::error::missing program alpha"; exit 1; }
           echo "$out" | grep -q '^\[program:beta\]'                 || { echo "::error::missing program beta"; exit 1; }
           echo "$out" | grep -q 'BRIDGE_NAME="sh-alpha"'            || { echo "::error::bad BRIDGE_NAME"; exit 1; }
           echo "$out" | grep -q 'BEEPER_BRIDGE_TYPE="signal"'       || { echo "::error::type not passed through"; exit 1; }
           echo "$out" | grep -q 'BBCTL_CONFIG="/data/bbctl/beta.json"' || { echo "::error::per-bridge BBCTL_CONFIG missing"; exit 1; }
-          if docker run --rm -e GENERATE_ONLY=1 -e BRIDGES="Bad Name" bbm-test 2>/dev/null; then
+          if docker run --rm -e GENERATE_ONLY=1 -e BRIDGES="Bad Name" "$IMG" 2>/dev/null; then
             echo "::error::invalid bridge name was accepted"; exit 1
           fi
+
+          # keep-deleted wiring: off by default, on when asked for, and only
+          # for bridges that actually have a patched binary in the image.
+          off="$(docker run --rm -e GENERATE_ONLY=1 -e BRIDGES="beta:signal" "$IMG")"
+          if echo "$off" | grep -q 'BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND'; then
+            echo "::error::patched binary used without KEEP_DELETED_MESSAGES"; exit 1
+          fi
+          on="$(docker run --rm -e GENERATE_ONLY=1 -e KEEP_DELETED_MESSAGES=true -e BRIDGES="beta:discord" "$IMG")"
+          echo "$on" | grep -q 'BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND="/opt/patched-bridges/mautrix-discord"' \
+            || { echo "::error::keep-deleted did not select the patched discord binary"; exit 1; }
+          echo "$on" | grep -q 'BRIDGE_KEEP_DELETED_MESSAGES="true"' \
+            || { echo "::error::keep-deleted env not passed to the bridge"; exit 1; }
           echo "entrypoint OK"
 
       - name: Summary

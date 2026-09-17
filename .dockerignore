@@ -2,3 +2,6 @@
 *
 !Dockerfile
 !docker-entrypoint.sh
+!build-bridges.sh
+!patches
+patches/README.md

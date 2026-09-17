@@ -63,6 +63,9 @@ Every bridge is an appservice using a websocket to Beeper's server, so no ports 
 | `BEEPER_ENV` | `prod` | Beeper environment |
 | `BRIDGE_START_SECS` | `30` | supervisord `startsecs` |
 | `BRIDGE_STOP_WAIT_SECS` | `30` | supervisord `stopwaitsecs` |
+| `KEEP_DELETED_MESSAGES` | unset | `true`/`1`/`yes`/`on` — keep remotely deleted messages and mark them instead. See below |
+| `KEEP_DELETED_MARKER` | `🗑️` | Reaction used as the deletion marker |
+| `PATCHED_BRIDGES_DIR` | `/opt/patched-bridges` | Where the patched binaries live in the image |
 | `GENERATE_ONLY` | unset | Print the generated supervisord config and exit, without starting anything |
 
 Any other `BEEPER_BRIDGE_*` variable ([bbctl run flags](https://github.com/beeper/bridge-manager/blob/main/cmd/bbctl/run.go)) is inherited by every bridge — set it once on the container. The useful ones:
@@ -92,6 +95,78 @@ Check what a given `BRIDGES` produces without starting anything:
 docker run --rm -e GENERATE_ONLY=1 -e BRIDGES="whatsapp,meta:meta" \
   ghcr.io/selfref/beeper-bridge-manager-docker:latest
 ```
+
+## Keeping deleted messages
+
+By default a mautrix bridge **redacts** the Matrix event when the remote
+network reports that a message was deleted. A Matrix redaction strips the
+content server-side and irreversibly, and the bridge drops its own database
+rows too, so the message is gone from your archive as well as from the chat.
+
+This image ships patched bridge binaries that can instead leave the message
+intact and add a single 🗑️ reaction to it:
+
+```yaml
+environment:
+  KEEP_DELETED_MESSAGES: "true"
+```
+
+Off by default. With the switch off the image behaves exactly like the
+unpatched one, down to using bbctl's own downloaded binaries.
+
+### How it works
+
+`bbctl run` normally downloads a stock binary at container start. When the
+switch is on and the image carries a patched binary for a bridge's type, the
+entrypoint adds two variables to that program:
+
+```
+BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND=/opt/patched-bridges/mautrix-<type>
+BRIDGE_KEEP_DELETED_MESSAGES=true
+```
+
+`BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND` is a stock bbctl flag; it swaps the
+executable and disables the update check, which is what stops a downloaded
+binary overwriting the patched one. Everything else — registration, config
+generation, the websocket transport, the persistence contract — is unchanged.
+
+Bridges with no patched binary in the image are left completely alone and keep
+downloading as before. The entrypoint prints how many matched on start:
+
+```
+keep-deleted: 8/10 bridge(s) running a patched binary
+```
+
+### What the patch changes
+
+Two code sites, because the bridges do not share one deletion path:
+
+| Target | File | Function |
+|---|---|---|
+| `bridgev2` (every bridge except Discord) | `bridgev2/portal.go` in mautrix-go | `Portal.handleRemoteMessageRemove` |
+| Discord (still bridgev1) | `portal.go` in mautrix-discord | `Portal.redactAllParts` |
+
+In both, a guard is inserted before the redaction: if the switch is on, react
+to the first part of the message and return, leaving the Matrix events *and*
+the bridge's database rows in place so replies and edits still resolve. Only
+the first part is marked — one deletion produces one marker, not one per
+attachment.
+
+The patcher (`patches/apply.py`) matches its anchors with regexes that tolerate
+upstream signature changes, and **fails the build** if an anchor is missing or
+ambiguous. That is deliberate: a silently unpatched binary looks identical
+until the first deletion.
+
+### Caveats
+
+- Deletions stop propagating out of the bridge, so a message you delete
+  elsewhere stays readable in Beeper. That is the point, but it is also a
+  privacy decision about other people's messages — make it knowingly.
+- The dim, centred "deleted" placeholder is a client-side rendering of a
+  redaction. Once you stop redacting you get a reaction chip instead; there is
+  no way to get the dim style in a normal chat room.
+- These are your own builds of the bridges, from `mautrix/<bridge>` main. They
+  update when this image is rebuilt (weekly), not when bbctl next starts.
 
 ## The persistence contract
 
@@ -137,7 +212,35 @@ docker build --build-arg BASE_IMAGE=ghcr.io/beeper/bridge-manager@sha256:... -t 
 | Arg | Default | Purpose |
 |---|---|---|
 | `BASE_IMAGE` | `ghcr.io/beeper/bridge-manager:latest` | Base to build on; CI pins it to a digest |
+| `PATCH_BRIDGES` | all Go bridges + discord | Which bridges to build patched binaries for |
+| `SIGNAL_STAGE` | `signal-build` | `signal-none` skips the mautrix-signal build |
+| `GO_IMAGE` / `RUST_IMAGE` | `golang:1-alpine` / `rust:1-alpine` | Toolchains for the builder stages |
+
+Building the bridges is most of the build time. `mautrix-signal` alone pulls in
+libsignal, a large Rust dependency with a BoringSSL submodule, and dominates
+the wall clock; skip it while iterating:
+
+```bash
+docker build --build-arg SIGNAL_STAGE=signal-none \
+             --build-arg PATCH_BRIDGES="discord" -t beeper-bridge-manager .
+```
 
 ## Licence
 
-The entrypoint and Dockerfile in this repo are AGPL-3.0, matching the bridges they run. The base image, `bbctl` (Apache-2.0) and the mautrix bridges (AGPL-3.0) are upstream projects with their own licences — this repo redistributes none of their source.
+This repository is **AGPL-3.0**, matching the bridges it patches. That covers
+both its own work (Dockerfile, `docker-entrypoint.sh`, `build-bridges.sh`,
+`patches/apply.py`, the workflow) and the two patch sources, which are compiled
+into upstream code and are modifications of it.
+
+Upstream licences: `bbctl` and the base image are Apache-2.0, `mautrix/go` is
+MPL-2.0, and every bridge (`mautrix/whatsapp`, `mautrix/discord`, …) is
+AGPL-3.0. MPL-2.0 permits the larger work to be distributed under AGPL-3.0
+(MPL section 3.3), and the mautrix-go files `apply.py` edits keep their own MPL
+headers, so nothing there needs relicensing.
+
+**The published image contains modified builds of AGPL-3.0 bridges, so
+AGPL-3.0 section 13 applies to it**: anyone interacting with those bridges over
+a network must be offered the corresponding source. That source is upstream
+`mautrix/<bridge>` and `mautrix/go` at the revisions `build-bridges.sh` clones,
+plus the modifications in `patches/` — which is the whole of what this image
+changes. `build-bridges.sh` is the complete build recipe.
