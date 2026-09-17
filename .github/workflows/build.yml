@@ -1,0 +1,150 @@
+name: Build image
+
+# Builds ghcr.io/selfref/beeper-bridge-manager-docker:latest — the official
+# Beeper bridge-manager image plus supervisord, so one container can run
+# several bridges (see README.md).
+#
+# The base image (ghcr.io/beeper/bridge-manager:latest) is rebuilt by Beeper
+# whenever bbctl changes, and this image is a thin layer on top, so the weekly
+# schedule exists to pick up those base updates. Note the bridge BINARIES are
+# not in the image at all — bbctl downloads them at container start, so bridge
+# updates do not need a rebuild.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - Dockerfile
+      - docker-entrypoint.sh
+      - .github/workflows/build.yml
+  pull_request:
+    paths:
+      - Dockerfile
+      - docker-entrypoint.sh
+      - .github/workflows/build.yml
+  schedule:
+    # Weekly, Monday. Offset from the other selfref image builds so the
+    # scheduled runs do not pile onto the same runner window.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      base_image:
+        description: "Base image to build on (repo:tag or repo@sha256:...); empty = ghcr.io/beeper/bridge-manager:latest"
+        required: false
+        default: ""
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Lint Dockerfile
+        run: docker build --check .
+
+      # GHCR requires lowercase names; github.repository may contain uppercase.
+      - name: Set image name
+        run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Resolve the base to an immutable digest and build against that, so both
+      # variants of "which base was this?" are answerable afterwards: the build
+      # is reproducible, and the digest is recorded as a label below.
+      - name: Resolve base image
+        id: base
+        env:
+          BASE_INPUT: ${{ inputs.base_image }}
+        run: |
+          set -euo pipefail
+          base="${BASE_INPUT:-ghcr.io/beeper/bridge-manager:latest}"
+          case "$base" in
+            *@sha256:*) pinned="$base" ;;
+            *)
+              digest="$(docker buildx imagetools inspect "$base" --format '{{.Manifest.Digest}}')"
+              [ -n "$digest" ] || { echo "::error::cannot resolve digest for ${base}"; exit 1; }
+              pinned="${base%%:*}@${digest}" ;;
+          esac
+          echo "pinned=${pinned}"                   >> "$GITHUB_OUTPUT"
+          echo "digest=${pinned##*@}"               >> "$GITHUB_OUTPUT"
+          echo "short=$(echo "${pinned##*@sha256:}" | cut -c1-12)" >> "$GITHUB_OUTPUT"
+          echo "base: ${pinned}"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # :latest          moving, newest build
+      # :sha-<7>         the recipe (this repo) that produced it
+      # :base-<digest12> which bridge-manager base it was built on
+      # :<YYYYMMDD>      scheduled builds
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short,enable={{is_default_branch}}
+            type=raw,value=base-${{ steps.base.outputs.short }},enable={{is_default_branch}}
+            type=schedule,pattern={{date 'YYYYMMDD'}}
+          labels: |
+            org.opencontainers.image.title=beeper-bridge-manager-docker
+            org.opencontainers.image.description=Beeper bridge-manager with supervisord — several self-hosted bridges in one container
+            dev.selfref.bridgemanager.base=${{ steps.base.outputs.pinned }}
+            dev.selfref.bridgemanager.base_digest=${{ steps.base.outputs.digest }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: BASE_IMAGE=${{ steps.base.outputs.pinned }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image is only useful if the entrypoint can turn $BRIDGES into a
+      # supervisord config, so assert that rather than just that it builds.
+      - name: Smoke test entrypoint
+        run: |
+          set -euo pipefail
+          docker build --build-arg "BASE_IMAGE=${{ steps.base.outputs.pinned }}" -t bbm-test .
+          out="$(docker run --rm -e GENERATE_ONLY=1 -e BRIDGES="alpha,beta:signal" bbm-test)"
+          echo "$out"
+          echo "$out" | grep -q '^\[program:alpha\]'                || { echo "::error::missing program alpha"; exit 1; }
+          echo "$out" | grep -q '^\[program:beta\]'                 || { echo "::error::missing program beta"; exit 1; }
+          echo "$out" | grep -q 'BRIDGE_NAME="sh-alpha"'            || { echo "::error::bad BRIDGE_NAME"; exit 1; }
+          echo "$out" | grep -q 'BEEPER_BRIDGE_TYPE="signal"'       || { echo "::error::type not passed through"; exit 1; }
+          echo "$out" | grep -q 'BBCTL_CONFIG="/data/bbctl/beta.json"' || { echo "::error::per-bridge BBCTL_CONFIG missing"; exit 1; }
+          if docker run --rm -e GENERATE_ONLY=1 -e BRIDGES="Bad Name" bbm-test 2>/dev/null; then
+            echo "::error::invalid bridge name was accepted"; exit 1
+          fi
+          echo "entrypoint OK"
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          BASE: ${{ steps.base.outputs.pinned }}
+        run: |
+          {
+            echo "### built on \`${BASE}\`"
+            echo
+            echo '```'; echo "$TAGS"; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
