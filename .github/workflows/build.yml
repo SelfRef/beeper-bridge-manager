@@ -184,11 +184,21 @@ jobs:
           if echo "$off" | grep -q 'BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND'; then
             echo "::error::patched binary used without KEEP_DELETED_MESSAGES"; exit 1
           fi
+          off2="$(docker run --rm -e GENERATE_ONLY=1 -e KEEP_DELETED_MESSAGES=off -e BRIDGES="beta:discord" "$IMG")"
+          if echo "$off2" | grep -q 'BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND'; then
+            echo "::error::KEEP_DELETED_MESSAGES=off still selected a patched binary"; exit 1
+          fi
           on="$(docker run --rm -e GENERATE_ONLY=1 -e KEEP_DELETED_MESSAGES=true -e BRIDGES="beta:discord" "$IMG")"
           echo "$on" | grep -q 'BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND="/opt/patched-bridges/mautrix-discord"' \
             || { echo "::error::keep-deleted did not select the patched discord binary"; exit 1; }
-          echo "$on" | grep -q 'BRIDGE_KEEP_DELETED_MESSAGES="true"' \
+          # The switch is an enum; the legacy booleans must still map to all.
+          echo "$on" | grep -q 'BRIDGE_KEEP_DELETED_MESSAGES="all"' \
             || { echo "::error::keep-deleted env not passed to the bridge"; exit 1; }
+          for mode in all self other; do
+            got="$(docker run --rm -e GENERATE_ONLY=1 -e KEEP_DELETED_MESSAGES="$mode" -e BRIDGES="beta:discord" "$IMG")"
+            echo "$got" | grep -q "BRIDGE_KEEP_DELETED_MESSAGES=\"$mode\"" \
+              || { echo "::error::keep-deleted mode $mode not passed through"; exit 1; }
+          done
           echo "entrypoint OK"
 
       - name: Summary

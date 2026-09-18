@@ -26,15 +26,23 @@
 # from the container environment by every program, so it is set once on the
 # container rather than repeated per bridge.
 #
-# Patched bridges: when KEEP_DELETED_MESSAGES is truthy AND the image carries a
+# Patched bridges: when KEEP_DELETED_MESSAGES is on AND the image carries a
 # patched binary for a bridge's type (/opt/patched-bridges/mautrix-<type>), that
 # program additionally gets
 #   BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND=<that binary>
-#   BRIDGE_KEEP_DELETED_MESSAGES=true
+#   BRIDGE_KEEP_DELETED_MESSAGES=<mode>
 # so bbctl runs our build instead of downloading the stock one. That flag also
 # turns off bbctl's update check, which is what keeps the patched binary in
 # place. Bridges with no patched binary are left completely untouched, and with
 # the switch off the image behaves exactly like the unpatched one.
+#
+# KEEP_DELETED_MESSAGES chooses WHOSE deleted messages are kept, by the sender
+# of the message rather than by who issued the deletion:
+#   off (default)  stock upstream: every deletion redacts
+#   all            keep everything
+#   self           keep only your own messages; other people's still redact
+#   other          keep only other people's messages; your own still redact
+# The old booleans still work: true/1/yes/on mean all, false/0/no mean off.
 #
 # Three independent markers, each off when its value is empty:
 #   KEEP_DELETED_MARKER         reaction on the kept message. UNSET means the
@@ -57,11 +65,19 @@ DATA_DIR=${DATA_DIR:-/data}
 START_SECS=${BRIDGE_START_SECS:-30}
 STOP_WAIT_SECS=${BRIDGE_STOP_WAIT_SECS:-30}
 PATCHED_DIR=${PATCHED_BRIDGES_DIR:-/opt/patched-bridges}
-KEEP_DELETED=${KEEP_DELETED_MESSAGES:-}
+KEEP_DELETED=$(printf '%s' "${KEEP_DELETED_MESSAGES:-}" | tr '[:upper:]' '[:lower:]')
 
 case "$KEEP_DELETED" in
-	1 | true | TRUE | True | yes | on) KEEP_DELETED=true ;;
-	*) KEEP_DELETED= ;;
+	"" | off | 0 | false | no) KEEP_DELETED= ;;
+	all | 1 | true | yes | on) KEEP_DELETED=all ;;
+	self | mine) KEEP_DELETED=self ;;
+	other | others | theirs) KEEP_DELETED=other ;;
+	*)
+		# Erring towards keeping content: this switch exists to prevent
+		# irreversible redactions, so a typo must not cause any.
+		echo "keep-deleted: WARNING - unknown KEEP_DELETED_MESSAGES '${KEEP_DELETED_MESSAGES}', using 'all'" >&2
+		KEEP_DELETED=all
+		;;
 esac
 
 # Marker: distinguish UNSET (use the bridge's default) from SET-BUT-EMPTY (no
@@ -133,7 +149,7 @@ for entry in $(echo "$BRIDGES" | tr ',' ' '); do
 		binary="${PATCHED_DIR}/mautrix-${type:-$name}"
 		if [ -n "$KEEP_DELETED" ] && [ -x "$binary" ]; then
 			printf ',BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND="%s"' "$binary"
-			printf ',BRIDGE_KEEP_DELETED_MESSAGES="true"'
+			printf ',BRIDGE_KEEP_DELETED_MESSAGES="%s"' "$KEEP_DELETED"
 			patched=$((patched + 1))
 		fi
 		printf '\n'
@@ -156,7 +172,7 @@ done
 
 echo "Configured ${count} bridge(s) from \$BRIDGES" >&2
 if [ -n "$KEEP_DELETED" ]; then
-	echo "keep-deleted: ${patched}/${count} bridge(s) running a patched binary" >&2
+	echo "keep-deleted: mode ${KEEP_DELETED}, ${patched}/${count} bridge(s) running a patched binary" >&2
 	if [ "$patched" -eq 0 ]; then
 		echo "keep-deleted: WARNING - no patched binary matched any bridge type in ${PATCHED_DIR}" >&2
 	fi

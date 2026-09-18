@@ -62,7 +62,7 @@ Every bridge is an appservice using a websocket to Beeper's server, so no ports 
 | `BEEPER_ENV` | `prod` | Beeper environment |
 | `BRIDGE_START_SECS` | `30` | supervisord `startsecs` |
 | `BRIDGE_STOP_WAIT_SECS` | `30` | supervisord `stopwaitsecs` |
-| `KEEP_DELETED_MESSAGES` | unset | `true`/`1`/`yes`/`on` — keep remotely deleted messages and mark them instead. See below |
+| `KEEP_DELETED_MESSAGES` | `off` | `off`/`all`/`self`/`other` — whose remotely deleted messages to keep and mark instead of redacting. See below |
 | `KEEP_DELETED_MARKER` | `🗑️` | Reaction used as the deletion marker. **Set it to empty for no reaction** |
 | `KEEP_DELETED_NOTICE` | unset | Fixed text for one notice replying to the kept message. Empty = off |
 | `KEEP_DELETED_NOTICE_SIDE` | `self` | Whose side that notice appears on: `self` or `sender` |
@@ -109,11 +109,34 @@ intact and mark it:
 
 ```yaml
 environment:
-  KEEP_DELETED_MESSAGES: "true"
+  KEEP_DELETED_MESSAGES: "other"
 ```
 
 Off by default. With the switch off the image behaves exactly like the
 unpatched one, down to using bbctl's own downloaded binaries.
+
+### Which side to keep
+
+| Value | Kept | Redacted as upstream |
+|---|---|---|
+| `off` (default) | nothing | every deletion |
+| `all` | every deletion | — |
+| `self` | messages you sent | messages other people sent |
+| `other` | messages other people sent | messages you sent |
+
+`other` is the common setup: your archive keeps what the other party took back,
+while deleting your own message still deletes it everywhere, leaving the usual
+redaction stub.
+
+The side is the **sender of the message**, not whoever issued the deletion. On
+most networks you can only delete your own messages, so the two coincide; where
+they do not — an admin deleting your message in a group — it counts as your
+side.
+
+`true`, `1`, `yes` and `on` still mean `all`, and `false`, `0` and `no` still
+mean `off`, so an older deployment keeps working unchanged. An unrecognised
+value warns on start and keeps everything, because this switch exists to
+prevent irreversible content loss and a typo must not cause any.
 
 ### The two markers
 
@@ -139,11 +162,15 @@ with a warning. `KEEP_DELETED_NOTICE_SIDE` on its own, with no
 
 ```yaml
 environment:
-  KEEP_DELETED_MESSAGES: "true"
+  KEEP_DELETED_MESSAGES: "all"
   KEEP_DELETED_MARKER: ""                        # no reaction
   KEEP_DELETED_NOTICE: "deleted this message"
   KEEP_DELETED_NOTICE_SIDE: "sender"
 ```
+
+`KEEP_DELETED_NOTICE_SIDE` and `KEEP_DELETED_MESSAGES` both say "side" and mean
+different things: the first is who the notice is sent as, the second is whose
+messages are kept at all.
 
 **Nothing here reaches the remote network.** The other person sees no reaction
 and no notice; this is entirely a change to your own copy of the conversation.
@@ -164,7 +191,7 @@ entrypoint adds two variables to that program:
 
 ```
 BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND=/opt/patched-bridges/mautrix-<type>
-BRIDGE_KEEP_DELETED_MESSAGES=true
+BRIDGE_KEEP_DELETED_MESSAGES=<mode>
 ```
 
 `BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND` is a stock bbctl flag; it swaps the
@@ -176,7 +203,7 @@ Bridges with no patched binary in the image are left completely alone and keep
 downloading as before. The entrypoint prints how many matched on start:
 
 ```
-keep-deleted: 8/10 bridge(s) running a patched binary
+keep-deleted: mode other, 8/10 bridge(s) running a patched binary
 ```
 
 ### What the patch changes
@@ -188,11 +215,12 @@ Two code sites, because the bridges do not share one deletion path:
 | `bridgev2` (every bridge except Discord) | `bridgev2/portal.go` in mautrix-go | `Portal.handleRemoteMessageRemove` |
 | Discord (still bridgev1) | `portal.go` in mautrix-discord | `Portal.redactAllParts` |
 
-In both, a guard is inserted before the redaction: if the switch is on, mark
-the first part of the message and return, leaving the Matrix events *and* the
-bridge's database rows in place so replies and edits still resolve. Only the
-first part is marked — one deletion produces one set of markers, not one per
-attachment.
+In both, a guard is inserted before the redaction: if this deletion is one the
+mode keeps, mark the first part of the message and return, leaving the Matrix
+events *and* the bridge's database rows in place so replies and edits still
+resolve. Only the first part is marked — one deletion produces one set of
+markers, not one per attachment. `off` costs one comparison and never looks up
+who sent anything.
 
 The patcher (`patches/apply.py`) matches its anchors with regexes that tolerate
 upstream signature changes, and **fails the build** if an anchor is missing or

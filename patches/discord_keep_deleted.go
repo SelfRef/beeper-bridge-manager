@@ -3,8 +3,9 @@
 // mautrix-discord is still a bridgev1 bridge, so it has its own deletion path
 // (Portal.redactAllParts) rather than sharing bridgev2's. This file is the
 // Discord equivalent of patches/bridgev2_keep_deleted.go; the call site is
-// rewritten by patches/apply.py. Same three independent markers, same
-// variables, same semantics — see that file for the details.
+// rewritten by patches/apply.py. Same modes (off/all/self/other), same three
+// independent markers, same variables, same semantics — see that file for the
+// details.
 package main
 
 import (
@@ -19,9 +20,37 @@ import (
 	"go.mau.fi/mautrix-discord/database"
 )
 
-var keepDeletedMessages = func() bool {
-	v, err := strconv.ParseBool(os.Getenv("BRIDGE_KEEP_DELETED_MESSAGES"))
-	return err == nil && v
+// off/all/self/other, with the legacy bools still meaning all/off and an
+// unrecognised value erring towards keeping the message. See the bridgev2
+// patch for the reasoning.
+type keepDeletedMode int
+
+const (
+	keepDeletedOff keepDeletedMode = iota
+	keepDeletedAll
+	keepDeletedSelf
+	keepDeletedOther
+)
+
+var keepDeletedMessages, keepDeletedModeInvalid = func() (keepDeletedMode, string) {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("BRIDGE_KEEP_DELETED_MESSAGES")))
+	switch raw {
+	case "", "off":
+		return keepDeletedOff, ""
+	case "all":
+		return keepDeletedAll, ""
+	case "self", "mine":
+		return keepDeletedSelf, ""
+	case "other", "others", "theirs":
+		return keepDeletedOther, ""
+	}
+	if v, err := strconv.ParseBool(raw); err == nil {
+		if v {
+			return keepDeletedAll, ""
+		}
+		return keepDeletedOff, ""
+	}
+	return keepDeletedAll, raw
 }()
 
 // Unset means the default 🗑️; set-but-empty means no reaction at all.
@@ -37,6 +66,49 @@ var keepDeletedNotice = os.Getenv("BRIDGE_KEEP_DELETED_NOTICE")
 
 // "self" (default) or "sender" — see the bridgev2 patch for the rationale.
 var keepDeletedNoticeSide = strings.ToLower(strings.TrimSpace(os.Getenv("BRIDGE_KEEP_DELETED_NOTICE_SIDE")))
+
+// shouldKeepDeleted decides whether this particular deletion is kept; see the
+// bridgev2 patch for why the side is the message's sender rather than the
+// party who issued the deletion.
+func (portal *Portal) shouldKeepDeleted(parts []*database.Message) bool {
+	switch keepDeletedMessages {
+	case keepDeletedOff:
+		return false
+	case keepDeletedAll:
+		if keepDeletedModeInvalid != "" {
+			portal.log.Warn().
+				Str("configured_mode", keepDeletedModeInvalid).
+				Msg("Unknown BRIDGE_KEEP_DELETED_MESSAGES, keeping all deleted messages")
+		}
+		return true
+	}
+	if len(parts) == 0 {
+		return false
+	}
+	isOwn := portal.keepDeletedIsOwnMessage(parts[0])
+	if keepDeletedMessages == keepDeletedSelf {
+		return isOwn
+	}
+	return !isOwn
+}
+
+// keepDeletedIsOwnMessage reports whether the message was sent by a logged-in
+// user of this bridge.
+//
+// GetUserByID is a lookup, not a constructor: with no matching row it reaches
+// loadUser(nil, nil), which returns nil without inserting anything. The portal
+// receiver is checked as well because it holds the owner's Discord ID in DMs,
+// which is the case where the user table lookup matters least and is most
+// likely to be racing a fresh login.
+func (portal *Portal) keepDeletedIsOwnMessage(msg *database.Message) bool {
+	if msg.SenderID == "" {
+		return false
+	}
+	if msg.SenderID == portal.Key.Receiver {
+		return true
+	}
+	return portal.bridge.GetUserByID(msg.SenderID) != nil
+}
 
 // markDeletedParts marks the first part of a deleted message and keeps both
 // the Matrix events and the bridge's database rows, so replies and edits

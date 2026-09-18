@@ -6,16 +6,30 @@ Applied by `apply.py`, driven by `../build-bridges.sh`.
 ## keep-deleted
 
 Stops a remote deletion from redacting the Matrix event. Instead the message is
-left intact and marked with a single 🗑️ reaction.
+left intact and marked with a single 🗑️ reaction — for every deletion, or only
+for one side of the conversation.
 
 Runtime switch, read once at bridge start:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `BRIDGE_KEEP_DELETED_MESSAGES` | unset | `true` enables the behaviour; anything else is stock upstream |
+| `BRIDGE_KEEP_DELETED_MESSAGES` | `off` | `off` / `all` / `self` / `other` — which side's deleted messages are kept. `true` and `false` still mean `all` and `off`; an unknown value warns and keeps everything |
 | `BRIDGE_KEEP_DELETED_MARKER` | `🗑️` | Reaction key. Read with `LookupEnv`: **unset** = default, **set-but-empty** = no reaction |
 | `BRIDGE_KEEP_DELETED_NOTICE` | unset | Body of one `m.notice` replying to the kept message |
 | `BRIDGE_KEEP_DELETED_NOTICE_SIDE` | `self` | `self` (local user via double puppeting) or `sender` (the deleting party). Unknown values warn and fall back to `self` |
+
+The side is decided by who SENT the message, not by who issued the deletion —
+the choice is whose content you keep. The two only differ when someone else can
+delete your message (a group admin), which counts as your side.
+
+`self` and `other` need to know whether a message is yours. bridgev2 takes the
+first of three signals that is populated, because which of them are filled in
+depends on the connector and on double puppeting: `Message.IsDoublePuppeted`,
+`Message.SenderMXID == UserLogin.UserMXID`, and finally
+`NetworkAPI.IsThisUser` (part of the interface, so every bridge has it, and
+checked last because it is the only one that can touch the client). Discord
+compares `Message.SenderID` against the portal receiver and the bridge's user
+table (`GetUserByID`, a lookup that returns nil rather than inserting a row).
 
 The container-level knobs drop the `BRIDGE_` prefix; the entrypoint translates
 them. The master switch is set per program, and only for bridges that actually

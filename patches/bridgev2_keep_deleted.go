@@ -6,6 +6,13 @@
 // the content server-side and irreversibly. On a self-hosted bridge holding
 // your own history that is usually not what you want.
 //
+// BRIDGE_KEEP_DELETED_MESSAGES picks WHOSE deletions are kept:
+//
+//	off (default)  stock upstream: every deletion redacts
+//	all            keep everything
+//	self           keep only messages you sent; other people's still redact
+//	other          keep only other people's messages; your own still redact
+//
 // Three independent markers, each off when its variable is empty:
 //
 //	BRIDGE_KEEP_DELETED_MARKER      reaction on the message (default 🗑️)
@@ -32,12 +39,46 @@ import (
 	"maunium.net/go/mautrix/event"
 )
 
-// keepDeletedMessages is the master switch, read from
-// $BRIDGE_KEEP_DELETED_MESSAGES at startup. When false the bridge behaves
-// exactly like upstream and none of the settings below are consulted.
-var keepDeletedMessages = func() bool {
-	v, err := strconv.ParseBool(os.Getenv("BRIDGE_KEEP_DELETED_MESSAGES"))
-	return err == nil && v
+// keepDeletedMode is the master switch, read from
+// $BRIDGE_KEEP_DELETED_MESSAGES at startup. It is an enum rather than a bool
+// because the two sides of a conversation are worth treating differently:
+// keeping what the other party deleted is the point of the patch, while your
+// own deletions are usually meant to be deletions.
+type keepDeletedMode int
+
+const (
+	keepDeletedOff keepDeletedMode = iota
+	keepDeletedAll
+	keepDeletedSelf
+	keepDeletedOther
+)
+
+// keepDeletedMessages is parsed once at startup. "true"/"false" and the other
+// strconv.ParseBool spellings still work and mean all/off, so an older
+// deployment keeps behaving the same. An unrecognised value keeps the message
+// rather than redacting it: this switch exists to avoid irreversible content
+// loss, so a typo must not cause any. keepDeletedModeInvalid then holds that
+// value, so the fallback can be reported at the call site, where there is a
+// logger to report it to.
+var keepDeletedMessages, keepDeletedModeInvalid = func() (keepDeletedMode, string) {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("BRIDGE_KEEP_DELETED_MESSAGES")))
+	switch raw {
+	case "", "off":
+		return keepDeletedOff, ""
+	case "all":
+		return keepDeletedAll, ""
+	case "self", "mine":
+		return keepDeletedSelf, ""
+	case "other", "others", "theirs":
+		return keepDeletedOther, ""
+	}
+	if v, err := strconv.ParseBool(raw); err == nil {
+		if v {
+			return keepDeletedAll, ""
+		}
+		return keepDeletedOff, ""
+	}
+	return keepDeletedAll, raw
 }()
 
 // keepDeletedMarker is the reaction placed on a kept message.
@@ -66,6 +107,57 @@ var keepDeletedNotice = os.Getenv("BRIDGE_KEEP_DELETED_NOTICE")
 //
 // There is deliberately only one notice; picking a side is the whole choice.
 var keepDeletedNoticeSide = strings.ToLower(strings.TrimSpace(os.Getenv("BRIDGE_KEEP_DELETED_NOTICE_SIDE")))
+
+// shouldKeepDeleted decides whether this particular deletion is kept. It is
+// the whole guard inserted at the call site, so an off switch costs one
+// comparison and never touches the database or the network client.
+//
+// The side is taken from who SENT the message, not from who deleted it: the
+// choice being made is whose content you keep. Most networks only let you
+// delete your own messages anyway, so the two coincide except for admin
+// deletions in groups, which count as the original sender's side.
+func (portal *Portal) shouldKeepDeleted(ctx context.Context, parts []*database.Message, source *UserLogin) bool {
+	switch keepDeletedMessages {
+	case keepDeletedOff:
+		return false
+	case keepDeletedAll:
+		if keepDeletedModeInvalid != "" {
+			zerolog.Ctx(ctx).Warn().
+				Str("configured_mode", keepDeletedModeInvalid).
+				Msg("Unknown BRIDGE_KEEP_DELETED_MESSAGES, keeping all deleted messages")
+		}
+		return true
+	}
+	if len(parts) == 0 {
+		return false
+	}
+	isOwn := portal.keepDeletedIsOwnMessage(ctx, parts[0], source)
+	if keepDeletedMessages == keepDeletedSelf {
+		return isOwn
+	}
+	return !isOwn
+}
+
+// keepDeletedIsOwnMessage reports whether the local user sent the message.
+//
+// Three signals, because which ones are populated depends on the network
+// connector and on whether double puppeting is enabled:
+//
+//	IsDoublePuppeted  the Matrix event was sent as the local user
+//	SenderMXID        same, for connectors that store the MXID without the flag
+//	IsThisUser        the connector's own answer for a remote user ID
+//
+// IsThisUser is part of NetworkAPI, so every bridge implements it; it is
+// checked last because it is the only one that can hit the network client.
+func (portal *Portal) keepDeletedIsOwnMessage(ctx context.Context, part *database.Message, source *UserLogin) bool {
+	if part.IsDoublePuppeted {
+		return true
+	}
+	if part.SenderMXID != "" && part.SenderMXID == source.UserMXID {
+		return true
+	}
+	return part.SenderID != "" && source.Client != nil && source.Client.IsThisUser(ctx, part.SenderID)
+}
 
 // markRemovedMessageParts handles a remote deletion without redacting.
 //
