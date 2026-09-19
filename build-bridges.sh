@@ -41,8 +41,17 @@ prepare_mautrix_go() {
 		commit=${ver##*-}
 		mkdir -p "$dest"
 		git -C "$dest" init -q
-		git -C "$dest" fetch -q --depth 1 https://github.com/mautrix/go "$commit"
-		git -C "$dest" checkout -q FETCH_HEAD
+		git -C "$dest" remote add origin https://github.com/mautrix/go
+		# A Go pseudo-version carries only the 12-character prefix of the
+		# commit, and GitHub refuses a fetch for an abbreviated object ("couldn't
+		# find remote ref"). Try the cheap shallow fetch anyway — it succeeds
+		# when a full SHA ever appears — and otherwise take a blobless clone of
+		# every branch, which is still small and lets git expand the
+		# abbreviation locally.
+		if ! git -C "$dest" fetch -q --depth 1 origin "$commit" 2>/dev/null; then
+			git -C "$dest" fetch -q --filter=blob:none origin
+		fi
+		git -C "$dest" checkout -q "$commit"
 		;;
 	*)
 		git clone -q --depth 1 -b "$ver" https://github.com/mautrix/go "$dest"
