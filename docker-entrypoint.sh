@@ -26,15 +26,18 @@
 # from the container environment by every program, so it is set once on the
 # container rather than repeated per bridge.
 #
-# Patched bridges: when KEEP_DELETED_MESSAGES is on AND the image carries a
-# patched binary for a bridge's type (/opt/patched-bridges/mautrix-<type>), that
-# program additionally gets
+# Patched bridges: when a patch is switched on AND the image carries a patched
+# binary for a bridge's type (/opt/patched-bridges/mautrix-<type>), that program
+# additionally gets
 #   BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND=<that binary>
-#   BRIDGE_KEEP_DELETED_MESSAGES=<mode>
 # so bbctl runs our build instead of downloading the stock one. That flag also
 # turns off bbctl's update check, which is what keeps the patched binary in
 # place. Bridges with no patched binary are left completely untouched, and with
-# the switch off the image behaves exactly like the unpatched one.
+# every switch off the image behaves exactly like the unpatched one.
+#
+# Two independent patches ask for the patched binary:
+#   KEEP_DELETED_MESSAGES  a remote deletion marks instead of redacting
+#   WATCH_URL              every bridged event is reported to beeper-watch
 #
 # KEEP_DELETED_MESSAGES chooses WHOSE deleted messages are kept, by the sender
 # of the message rather than by who issued the deletion:
@@ -54,6 +57,20 @@
 # These are exported to supervisord rather than written into `environment=`
 # lines, because supervisord runs %(...)s expansion over that field and these
 # hold arbitrary operator text — a literal % would break the config file.
+#
+# WATCH_URL turns on the beeper-watch hook: the bridge POSTs every event it
+# handles — messages, edits, reactions, deletions, both directions — to that
+# URL in plaintext, before encryption, so something outside the bridge can
+# react to it. Beeper exposes no events at all, which is why this exists.
+#   WATCH_URL           where to POST; empty disables the hook entirely
+#   WATCH_TOKEN         bearer token for that endpoint
+#   WATCH_OUTGOING      false to report only what arrives from the network
+#   WATCH_RAW_CONTENT   true to include each event's full content
+#   WATCH_MAX_BODY      truncate message bodies to this many bytes
+#   WATCH_QUEUE / WATCH_WORKERS / WATCH_TIMEOUT / WATCH_ATTEMPTS  delivery
+# There is deliberately no per-bridge switch: which networks matter is a rule
+# in beeper-watch, not ten environment variables here. These are exported
+# globally for the same %-expansion reason as the marker above.
 set -eu
 
 # /etc/supervisord.conf is supervisorctl's default search path, so writing it
@@ -95,6 +112,21 @@ if [ -n "$KEEP_DELETED" ]; then
 		fi
 	fi
 fi
+
+WATCH=${WATCH_URL:-}
+if [ -n "$WATCH" ]; then
+	export BRIDGE_WATCH_URL="$WATCH"
+	for var in TOKEN OUTGOING RAW_CONTENT MAX_BODY QUEUE WORKERS TIMEOUT ATTEMPTS NETWORK; do
+		# eval rather than ${!var}: this runs under ash, not bash.
+		eval "value=\${WATCH_${var}:-}"
+		[ -n "$value" ] && export "BRIDGE_WATCH_${var}=$value"
+	done
+fi
+
+# Either patch is a reason to run our own binary instead of the stock one.
+USE_PATCHED=
+[ -n "$KEEP_DELETED" ] && USE_PATCHED=1
+[ -n "$WATCH" ] && USE_PATCHED=1
 
 if [ -z "${BRIDGES:-}" ]; then
 	echo "BRIDGES is not set — nothing to run." >&2
@@ -147,9 +179,13 @@ for entry in $(echo "$BRIDGES" | tr ',' ' '); do
 		# bbctl names bridge binaries mautrix-<type>; fall back to the bridge
 		# name when no type was given (bbctl would then guess the same way).
 		binary="${PATCHED_DIR}/mautrix-${type:-$name}"
-		if [ -n "$KEEP_DELETED" ] && [ -x "$binary" ]; then
+		if [ -n "$USE_PATCHED" ] && [ -x "$binary" ]; then
 			printf ',BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND="%s"' "$binary"
-			printf ',BRIDGE_KEEP_DELETED_MESSAGES="%s"' "$KEEP_DELETED"
+			# Per program rather than exported, because this one is an enum
+			# from a fixed set and can never contain a literal %.
+			if [ -n "$KEEP_DELETED" ]; then
+				printf ',BRIDGE_KEEP_DELETED_MESSAGES="%s"' "$KEEP_DELETED"
+			fi
 			patched=$((patched + 1))
 		fi
 		printf '\n'
@@ -171,11 +207,20 @@ for entry in $(echo "$BRIDGES" | tr ',' ' '); do
 done
 
 echo "Configured ${count} bridge(s) from \$BRIDGES" >&2
-if [ -n "$KEEP_DELETED" ]; then
-	echo "keep-deleted: mode ${KEEP_DELETED}, ${patched}/${count} bridge(s) running a patched binary" >&2
+if [ -n "$USE_PATCHED" ]; then
+	echo "patched binaries: ${patched}/${count} bridge(s)" >&2
 	if [ "$patched" -eq 0 ]; then
-		echo "keep-deleted: WARNING - no patched binary matched any bridge type in ${PATCHED_DIR}" >&2
+		echo "WARNING - no patched binary matched any bridge type in ${PATCHED_DIR}" >&2
 	fi
+fi
+if [ -n "$WATCH" ]; then
+	echo "beeper-watch: reporting events to ${WATCH}" >&2
+	if [ -z "${WATCH_TOKEN:-}" ]; then
+		echo "beeper-watch: WARNING - no WATCH_TOKEN set, events are sent unauthenticated" >&2
+	fi
+fi
+if [ -n "$KEEP_DELETED" ]; then
+	echo "keep-deleted: mode ${KEEP_DELETED}" >&2
 	if [ -n "$MARKER_IS_SET" ] && [ -z "${KEEP_DELETED_MARKER}" ]; then
 		echo "keep-deleted: marker disabled (KEEP_DELETED_MARKER is set but empty)" >&2
 	else

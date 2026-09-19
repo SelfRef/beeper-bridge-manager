@@ -187,7 +187,7 @@ func (portal *Portal) markRemovedMessageParts(
 
 	if keepDeletedMarker != "" {
 		attempted++
-		resp, err := intent.SendMessage(ctx, portal.MXID, event.EventReaction, &event.Content{
+		content := &event.Content{
 			Parsed: &event.ReactionEventContent{
 				RelatesTo: event.RelatesTo{
 					Type:    event.RelAnnotation,
@@ -195,7 +195,13 @@ func (portal *Portal) markRemovedMessageParts(
 					Key:     keepDeletedMarker,
 				},
 			},
-		}, &MatrixSendExtra{Timestamp: ts})
+		}
+		// What is being sent is a reaction; what HAPPENED is a deletion.
+		// Without this the watcher could not tell this marker apart from
+		// someone reacting with the same emoji. The marker is consumed and
+		// removed by the reporter, so it never reaches the homeserver.
+		WatchMarkKind(content, "deletion")
+		resp, err := intent.SendMessage(ctx, portal.MXID, event.EventReaction, content, &MatrixSendExtra{Timestamp: ts})
 		if err != nil {
 			failed++
 			log.Err(err).Stringer("event_id", target.MXID).Msg("Failed to react to remotely deleted message")
@@ -246,7 +252,7 @@ func (portal *Portal) sendKeepDeletedNotice(
 	kind string,
 ) bool {
 	log := zerolog.Ctx(ctx)
-	resp, err := intent.SendMessage(ctx, portal.MXID, event.EventMessage, &event.Content{
+	content := &event.Content{
 		Parsed: &event.MessageEventContent{
 			MsgType: event.MsgNotice,
 			Body:    body,
@@ -254,7 +260,11 @@ func (portal *Portal) sendKeepDeletedNotice(
 				InReplyTo: &event.InReplyTo{EventID: target.MXID},
 			},
 		},
-	}, &MatrixSendExtra{Timestamp: ts})
+	}
+	// Same reasoning as the marker reaction: this bubble is a deletion, not
+	// a message someone typed.
+	WatchMarkKind(content, "deletion")
+	resp, err := intent.SendMessage(ctx, portal.MXID, event.EventMessage, content, &MatrixSendExtra{Timestamp: ts})
 	if err != nil {
 		log.Err(err).
 			Str("notice_kind", kind).

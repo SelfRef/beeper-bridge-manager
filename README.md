@@ -2,7 +2,9 @@
 
 [bridge-manager](https://github.com/beeper/bridge-manager) (`bbctl`) connects self-hosted [mautrix](https://github.com/mautrix) bridges to your Beeper account, and Beeper publishes [a container image](https://github.com/beeper/bridge-manager/tree/main/docker) for it. That image runs **one bridge per container**, because `bbctl run` handles exactly one bridge per process — ten networks means ten containers, ten copies of the same config, ten sets of downloaded binaries.
 
-This image adds `supervisord` on top of Beeper's, so one container runs as many bridges as you list in `$BRIDGES`. Nothing else is changed: every bridge still runs through the base image's own `run-bridge.sh`.
+This image adds `supervisord` on top of Beeper's, so one container runs as many bridges as you list in `$BRIDGES`. Every bridge still runs through the base image's own `run-bridge.sh`.
+
+It also ships its own builds of the bridge binaries, carrying two optional patches — [keeping deleted messages](#keeping-deleted-messages) and [reporting events](#reporting-events-beeper-watch). Both are off unless you switch them on, and with both off the image behaves exactly like the unpatched one, down to using bbctl's own downloaded binaries.
 
 `linux/amd64`.
 
@@ -66,6 +68,12 @@ Every bridge is an appservice using a websocket to Beeper's server, so no ports 
 | `KEEP_DELETED_MARKER` | `🗑️` | Reaction used as the deletion marker. **Set it to empty for no reaction** |
 | `KEEP_DELETED_NOTICE` | unset | Fixed text for one notice replying to the kept message. Empty = off |
 | `KEEP_DELETED_NOTICE_SIDE` | `self` | Whose side that notice appears on: `self` or `sender` |
+| `WATCH_URL` | unset | POST every bridged event to this URL, in plaintext. Empty = off. See below |
+| `WATCH_TOKEN` | unset | Bearer token for that endpoint |
+| `WATCH_OUTGOING` | `true` | `false` reports only what arrives from the network, not what you send |
+| `WATCH_RAW_CONTENT` | `false` | `true` includes each event's full content in the report |
+| `WATCH_MAX_BODY` | `8192` | Truncate reported message bodies to this many bytes |
+| `WATCH_QUEUE` / `WATCH_WORKERS` / `WATCH_TIMEOUT` / `WATCH_ATTEMPTS` | `256` / `2` / `5` / `3` | Delivery tuning |
 | `PATCHED_BRIDGES_DIR` | `/opt/patched-bridges` | Where the patched binaries live in the image |
 | `GENERATE_ONLY` | unset | Print the generated supervisord config and exit, without starting anything |
 
@@ -239,6 +247,63 @@ until the first deletion.
   markers. Upstream has the same shape of problem; there is no dedup here.
 - These are your own builds of the bridges, from `mautrix/<bridge>` main. They
   update when this image is rebuilt (weekly), not when bbctl next starts.
+- With `WATCH_URL` also set, a kept deletion is still reported as a deletion
+  rather than as the reaction it is sent as — see `patches/README.md`.
+
+## Reporting events (beeper-watch)
+
+Beeper has no event API: no webhooks, no gateway, and its Desktop API is
+request/response only. And the portals a bridge creates are end-to-end
+encrypted, so a Matrix client watching `/sync` can see that a message arrived
+and who sent it, but not what it said.
+
+The bridge can. It holds the plaintext right up until it encrypts it. With
+`WATCH_URL` set, every event it handles is POSTed there as it happens:
+
+```yaml
+environment:
+  WATCH_URL: "http://beeper-watch:8080/v1/events"
+  WATCH_TOKEN: "..."
+```
+
+Messages, edits, reactions, unreactions, deletions and stickers, in both
+directions — what arrives from the network, and what you send from a Beeper
+client. One flat JSON object per event:
+
+```json
+{
+  "schema": 1,
+  "bridge": "sh-telegram", "network": "telegram",
+  "direction": "in", "kind": "message",
+  "room_id": "!abc:beeper.local", "event_id": "$xyz",
+  "sender": "@sh-telegram_1127943894:beeper.local",
+  "sender_remote_id": "1127943894", "is_self": false,
+  "timestamp": 1758300000000,
+  "type": "m.room.message", "msgtype": "m.text",
+  "body": "Can you send me the report today?"
+}
+```
+
+The receiving end is a separate service,
+[beeper-watch](https://github.com/SelfRef/beeper-watch), which holds the
+filters and forwards what matches to a webhook. Nothing here knows about
+rules: this half reports everything and lets the other half decide.
+
+### What it will not do
+
+- **Block the bridge.** Delivery is a bounded queue drained by background
+  workers; a full queue drops the event with a warning, and no failure here can
+  surface as a bridging error. Durability is the receiver's job.
+- **Report bridges without a patched binary.** The hook is compiled in, so a
+  bridge bbctl downloaded at start reports nothing. The startup log says how
+  many bridges are running a patched binary.
+- **Report Beeper's own cloud bridges.** They run on Beeper's infrastructure;
+  only what this container bridges is visible.
+- **Filter per bridge.** There is deliberately no per-bridge switch: which
+  networks matter is a rule in the receiver, not ten variables here.
+
+Full details, including where each hook sits and what happens to a deletion
+when keep-deleted is also on, are in [`patches/README.md`](patches/README.md).
 
 ## The persistence contract
 

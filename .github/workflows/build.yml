@@ -150,16 +150,19 @@ jobs:
           docker image inspect "$IMG" >/dev/null
 
           # The patched binaries are the reason this build is slow, so assert
-          # they are present and actually carry the patch, not just that the
-          # image exists. A silently unpatched binary looks identical until
-          # the first deletion.
+          # they are present and actually carry BOTH patches, not just that the
+          # image exists. A silently unpatched binary looks identical until the
+          # first deletion, or until the first event that should have been
+          # reported and was not.
           docker run --rm --entrypoint /bin/sh "$IMG" -c '
             set -eu
             n=0
             for b in /opt/patched-bridges/mautrix-*; do
               [ -f "$b" ] || continue
               strings "$b" | grep -q BRIDGE_KEEP_DELETED_MESSAGES \
-                || { echo "UNPATCHED: $b"; exit 1; }
+                || { echo "MISSING keep-deleted: $b"; exit 1; }
+              strings "$b" | grep -q BRIDGE_WATCH_URL \
+                || { echo "MISSING beeper-watch: $b"; exit 1; }
               echo "patched: $(basename "$b")"
               n=$((n + 1))
             done
@@ -199,6 +202,22 @@ jobs:
             echo "$got" | grep -q "BRIDGE_KEEP_DELETED_MESSAGES=\"$mode\"" \
               || { echo "::error::keep-deleted mode $mode not passed through"; exit 1; }
           done
+
+          # beeper-watch wiring: it selects the patched binary on its own, with
+          # keep-deleted off, and must NOT switch keep-deleted on as a side
+          # effect — that one silently changes what happens to other people's
+          # deleted messages.
+          watch="$(docker run --rm -e GENERATE_ONLY=1 -e WATCH_URL=http://watch:8080/v1/events -e BRIDGES="beta:discord" "$IMG" 2>&1)"
+          echo "$watch" | grep -q 'BEEPER_BRIDGE_CUSTOM_STARTUP_COMMAND="/opt/patched-bridges/mautrix-discord"' \
+            || { echo "::error::WATCH_URL did not select the patched binary"; exit 1; }
+          if echo "$watch" | grep -q 'BRIDGE_KEEP_DELETED_MESSAGES'; then
+            echo "::error::WATCH_URL switched keep-deleted on as a side effect"; exit 1
+          fi
+          echo "$watch" | grep -q 'beeper-watch: reporting events to http://watch:8080/v1/events' \
+            || { echo "::error::watch not reported at startup"; exit 1; }
+          both="$(docker run --rm -e GENERATE_ONLY=1 -e WATCH_URL=http://watch:8080/v1/events -e KEEP_DELETED_MESSAGES=other -e BRIDGES="beta:discord" "$IMG")"
+          echo "$both" | grep -q 'BRIDGE_KEEP_DELETED_MESSAGES="other"' \
+            || { echo "::error::keep-deleted lost when watch is also on"; exit 1; }
           echo "entrypoint OK"
 
       - name: Summary
