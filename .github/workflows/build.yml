@@ -1,6 +1,6 @@
 name: Build image
 
-# Builds ghcr.io/selfref/beeper-bridge-manager-docker:latest — the official
+# Builds ghcr.io/selfref/beeper-bridge-manager:latest — the official
 # Beeper bridge-manager image plus supervisord, so one container can run
 # several bridges (see README.md).
 #
@@ -65,7 +65,10 @@ jobs:
 
       # GHCR requires lowercase names; github.repository may contain uppercase.
       - name: Set image name
-        run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+        run: |
+          echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          repo="${GITHUB_REPOSITORY##*/}"
+          echo "REPO_NAME=${repo,,}" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v4
 
@@ -113,7 +116,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=pr
           labels: |
-            org.opencontainers.image.title=beeper-bridge-manager-docker
+            org.opencontainers.image.title=${{ env.REPO_NAME }}
             org.opencontainers.image.description=Beeper bridge-manager with supervisord — several self-hosted bridges in one container
             dev.selfref.bridgemanager.base=${{ steps.base.outputs.pinned }}
             dev.selfref.bridgemanager.base_digest=${{ steps.base.outputs.digest }}

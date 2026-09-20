@@ -11,7 +11,7 @@ It also ships its own builds of the bridge binaries, carrying two optional patch
 ## Get the image
 
 ```bash
-docker pull ghcr.io/selfref/beeper-bridge-manager-docker:latest
+docker pull ghcr.io/selfref/beeper-bridge-manager:latest
 ```
 
 `latest` is the only tag: moving, newest build. Labels
@@ -29,7 +29,7 @@ start. Bridges without a patched binary still update on restart via `bbctl`.
 ```yaml
 services:
   beeper-bridges:
-    image: ghcr.io/selfref/beeper-bridge-manager-docker:latest
+    image: ghcr.io/selfref/beeper-bridge-manager:latest
     restart: unless-stopped
     volumes:
       - ./data:/data
@@ -101,7 +101,7 @@ Check what a given `BRIDGES` produces without starting anything:
 
 ```bash
 docker run --rm -e GENERATE_ONLY=1 -e BRIDGES="whatsapp,meta:meta" \
-  ghcr.io/selfref/beeper-bridge-manager-docker:latest
+  ghcr.io/selfref/beeper-bridge-manager:latest
 ```
 
 ## Keeping deleted messages
