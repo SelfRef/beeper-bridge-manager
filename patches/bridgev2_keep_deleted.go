@@ -152,19 +152,25 @@ func (portal *Portal) shouldKeepDeleted(ctx context.Context, parts []*database.M
 
 // keepDeletedIsOwnMessage reports whether the local user sent the message.
 //
-// Three signals, because which ones are populated depends on the network
-// connector and on whether double puppeting is enabled:
+// Two signals, because which one is populated depends on the connector and on
+// whether double puppeting is enabled:
 //
-//	IsDoublePuppeted  the Matrix event was sent as the local user
-//	SenderMXID        same, for connectors that store the MXID without the flag
-//	IsThisUser        the connector's own answer for a remote user ID
+//	SenderMXID  the Matrix event was sent as the local user
+//	IsThisUser  the connector's own answer for a remote user ID
 //
 // IsThisUser is part of NetworkAPI, so every bridge implements it; it is
 // checked last because it is the only one that can hit the network client.
+//
+// Message.IsDoublePuppeted is deliberately NOT used, although it is the field
+// that names this exact question. It is unusable as read back from the
+// database: Message.Scan sets it from `doublePuppeted.Valid`, which reports
+// whether the column was non-NULL rather than whether it was true, and
+// sqlVariables always writes a plain bool — so the column is never NULL and
+// every stored message loads with the flag set. Trusting it made every message
+// look like ours, which silently turned the `other` mode into `off`.
+// SenderMXID covers the same case correctly: a double-puppeted message has the
+// local user's MXID there.
 func (portal *Portal) keepDeletedIsOwnMessage(ctx context.Context, part *database.Message, source *UserLogin) bool {
-	if part.IsDoublePuppeted {
-		return true
-	}
 	if part.SenderMXID != "" && part.SenderMXID == source.UserMXID {
 		return true
 	}

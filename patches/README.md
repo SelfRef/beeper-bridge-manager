@@ -30,11 +30,19 @@ the choice is whose content you keep. The two only differ when someone else can
 delete your message (a group admin), which counts as your side.
 
 `self` and `other` need to know whether a message is yours. bridgev2 takes the
-first of three signals that is populated, because which of them are filled in
-depends on the connector and on double puppeting: `Message.IsDoublePuppeted`,
-`Message.SenderMXID == UserLogin.UserMXID`, and finally
-`NetworkAPI.IsThisUser` (part of the interface, so every bridge has it, and
-checked last because it is the only one that can touch the client). Discord
+first of two signals that is populated, because which of them are filled in
+depends on the connector and on double puppeting:
+`Message.SenderMXID == UserLogin.UserMXID`, and then `NetworkAPI.IsThisUser`
+(part of the interface, so every bridge has it, and checked last because it is
+the only one that can touch the client).
+
+`Message.IsDoublePuppeted` is NOT used, although it names this exact question.
+It is unusable as read back from the database: `Message.Scan` sets it from
+`doublePuppeted.Valid`, i.e. whether the COLUMN was non-NULL rather than
+whether it was true, while `sqlVariables` always writes a plain bool. The
+column is therefore never NULL and every stored message loads with the flag
+set — which made every message look like ours and silently turned `other` into
+`off`. `SenderMXID` covers the same case correctly. Discord
 compares `Message.SenderID` against the portal receiver and the bridge's user
 table (`GetUserByID`, a lookup that returns nil rather than inserting a row).
 
