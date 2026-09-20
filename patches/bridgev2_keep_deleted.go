@@ -117,7 +117,9 @@ var keepDeletedNotice, keepDeletedNoticeInvalid = func() (bool, string) {
 }()
 
 // keepDeletedNoticeTimeFormat is the datetime in the notice. Local time,
-// because the person reading it is the one running the bridge.
+// because the person reading it is the one running the bridge — which means
+// the container needs both TZ and the zone database, or time.Local silently
+// falls back to UTC and the notice is off by the offset.
 const keepDeletedNoticeTimeFormat = "2006-01-02 15:04"
 
 // shouldKeepDeleted decides whether this particular deletion is kept. It is

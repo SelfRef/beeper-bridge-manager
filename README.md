@@ -67,6 +67,7 @@ Every bridge is an appservice using a websocket to Beeper's server, so no ports 
 | `KEEP_DELETED_MESSAGES` | `off` | `off`/`all`/`self`/`other` — whose remotely deleted messages to keep and mark instead of redacting. See below |
 | `KEEP_DELETED_MARKER` | `🗑️` | Reaction used as the deletion marker. **Set it to empty for no reaction** |
 | `KEEP_DELETED_NOTICE` | follows `KEEP_DELETED_MESSAGES` | Bool — one bridge-bot notice replying to the kept message, naming who deleted it and when |
+| `TZ` | `UTC` | Zone the deletion notice stamps its time in, e.g. `Europe/Warsaw` (the image carries tzdata) |
 | `WATCH_URL` | unset | POST every bridged event to this URL, in plaintext. Empty = off. See below |
 | `WATCH_TOKEN` | unset | Bearer token for that endpoint |
 | `WATCH_OUTGOING` | `true` | `false` reports only what arrives from the network, not what you send |

@@ -70,7 +70,24 @@ set -eu
 ver=$(awk '/maunium\.net\/go\/mautrix v/ {print $2; exit}' go.mod)
 [ -n "$ver" ] || { echo "FATAL: no mautrix-go requirement in signal/go.mod" >&2; exit 1; }
 echo "mautrix-go $ver"
-git clone -q --depth 1 -b "$ver" https://github.com/mautrix/go /mautrix-go
+# Same tag-or-pseudo-version dance as prepare_mautrix_go in build-bridges.sh:
+# a pseudo-version (vX.Y.Z-0.<ts>-<commit>) is not a ref, and GitHub refuses a
+# fetch for the 12-character commit prefix it carries, so fall back to a
+# blobless clone and let git expand the abbreviation locally.
+case "$ver" in
+*-*-*)
+	mkdir -p /mautrix-go
+	git -C /mautrix-go init -q
+	git -C /mautrix-go remote add origin https://github.com/mautrix/go
+	if ! git -C /mautrix-go fetch -q --depth 1 origin "${ver##*-}" 2>/dev/null; then
+		git -C /mautrix-go fetch -q --filter=blob:none origin
+	fi
+	git -C /mautrix-go checkout -q "${ver##*-}"
+	;;
+*)
+	git clone -q --depth 1 -b "$ver" https://github.com/mautrix/go /mautrix-go
+	;;
+esac
 python3 /patches/apply.py bridgev2 /mautrix-go
 go mod edit -replace "maunium.net/go/mautrix=/mautrix-go"
 go mod tidy
@@ -90,8 +107,11 @@ FROM ${SIGNAL_STAGE} AS signal-final
 # --- runtime --------------------------------------------------------------
 FROM ${BASE_IMAGE}
 
-# Alpine base (bridge-manager builds on alpine:3.23).
-RUN apk add --no-cache supervisor
+# Alpine base (bridge-manager builds on alpine:3.23). tzdata is here for the
+# keep-deleted notice: it stamps a local time, and without the zone database
+# Go's time.Local is UTC no matter what TZ says, so the notice would claim the
+# wrong hour for anyone not on UTC.
+RUN apk add --no-cache supervisor tzdata
 
 COPY --from=bridges /out/ /opt/patched-bridges/
 COPY --from=signal-final /out/ /opt/patched-bridges/
