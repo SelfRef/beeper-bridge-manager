@@ -14,8 +14,8 @@ built here behaves exactly like the stock one until it is configured:
 ## keep-deleted
 
 Stops a remote deletion from redacting the Matrix event. Instead the message is
-left intact and marked with a single 🗑️ reaction — for every deletion, or only
-for one side of the conversation.
+left intact and marked — with a reaction, a one-line notice from the bridge bot,
+or both — for every deletion, or only for one side of the conversation.
 
 Runtime switch, read once at bridge start:
 
@@ -23,8 +23,7 @@ Runtime switch, read once at bridge start:
 |---|---|---|
 | `BRIDGE_KEEP_DELETED_MESSAGES` | `off` | `off` / `all` / `self` / `other` — which side's deleted messages are kept. `true` and `false` still mean `all` and `off`; an unknown value warns and keeps everything |
 | `BRIDGE_KEEP_DELETED_MARKER` | `🗑️` | Reaction key. Read with `LookupEnv`: **unset** = default, **set-but-empty** = no reaction |
-| `BRIDGE_KEEP_DELETED_NOTICE` | unset | Body of one `m.notice` replying to the kept message |
-| `BRIDGE_KEEP_DELETED_NOTICE_SIDE` | `self` | `self` (local user via double puppeting) or `sender` (the deleting party). Unknown values warn and fall back to `self` |
+| `BRIDGE_KEEP_DELETED_NOTICE` | follows `_MESSAGES` | Bool. One `m.notice` from the BRIDGE BOT replying to the kept message: `🗑️ <sender> deleted this message at <YYYY-MM-DD HH:MM>`. Unset = on whenever deletions are kept at all; an unparseable value warns and does the same |
 
 The side is decided by who SENT the message, not by who issued the deletion —
 the choice is whose content you keep. The two only differ when someone else can
@@ -38,6 +37,14 @@ depends on the connector and on double puppeting: `Message.IsDoublePuppeted`,
 checked last because it is the only one that can touch the client). Discord
 compares `Message.SenderID` against the portal receiver and the bridge's user
 table (`GetUserByID`, a lookup that returns nil rather than inserting a row).
+
+The notice sender is the bridge bot deliberately: Beeper renders an `m.notice`
+from the bot as dim centred text with no bubble in any room, so the marker reads
+as bridge bookkeeping rather than as something a participant said. The name in
+it is the message's sender (falling back to `Someone` for an unsynced ghost),
+looked up without inserting a row — `Bridge.GetGhostByID` on bridgev2,
+`DB.Puppet.Get` rather than `GetPuppetByID` on Discord. The body carries no
+`formatted_body`, so a display name containing HTML needs no escaping.
 
 The container-level knobs drop the `BRIDGE_` prefix; the entrypoint translates
 them. The master switch is set per program, and only for bridges that actually
@@ -197,7 +204,8 @@ signature changed — which is the failure mode the wrappers are designed to
 produce. Look at the function named in the table above, update the regex in
 `apply.py`, and check that the helper still compiles against the new API — the
 helper uses `intent.SendMessage`, `event.ReactionEventContent`,
-`event.MessageEventContent`, `event.RelatesTo.InReplyTo`, `MatrixSendExtra` and
-`(*UserLogin).User.DoublePuppet`, all of which are identical in v0.28 and
-v0.31. Note the bridgev2 guard passes `source` as well as `intent`, because the
-self notice needs the local user's double puppet.
+`event.MessageEventContent`, `event.RelatesTo.InReplyTo`, `MatrixSendExtra`,
+`Bridge.Bot` and `Bridge.GetGhostByID`, all of which are identical in v0.28 and
+v0.31. Note the bridgev2 guard passes `source` to `shouldKeepDeleted` as well
+as `intent` to the marker, because deciding whose message it was needs the
+login.

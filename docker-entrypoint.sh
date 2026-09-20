@@ -47,16 +47,16 @@
 #   other          keep only other people's messages; your own still redact
 # The old booleans still work: true/1/yes/on mean all, false/0/no mean off.
 #
-# Three independent markers, each off when its value is empty:
-#   KEEP_DELETED_MARKER         reaction on the kept message. UNSET means the
-#                               bridge default (a wastebasket); set-but-EMPTY
-#                               means no reaction at all
-#   KEEP_DELETED_NOTICE         text of one m.notice replying to the message
-#   KEEP_DELETED_NOTICE_SIDE    whose side it appears on: self (default, needs
-#                               double puppeting) or sender
-# These are exported to supervisord rather than written into `environment=`
-# lines, because supervisord runs %(...)s expansion over that field and these
-# hold arbitrary operator text — a literal % would break the config file.
+# Two independent markers on a kept message:
+#   KEEP_DELETED_MARKER   reaction on it. UNSET means the bridge default (a
+#                         wastebasket); set-but-EMPTY means no reaction at all
+#   KEEP_DELETED_NOTICE   bool: one bridge-bot notice replying to it, saying
+#                         who deleted it and when. UNSET follows
+#                         KEEP_DELETED_MESSAGES — on when deletions are kept
+# KEEP_DELETED_MARKER is exported to supervisord rather than written into an
+# `environment=` line, because supervisord runs %(...)s expansion over that
+# field and this one holds arbitrary operator text — a literal % would break
+# the config file.
 #
 # WATCH_URL turns on the beeper-watch hook: the bridge POSTs every event it
 # handles — messages, edits, reactions, deletions, both directions — to that
@@ -101,16 +101,25 @@ esac
 # reaction). ${VAR+x} is the only portable way to tell those apart.
 MARKER_IS_SET=${KEEP_DELETED_MARKER+set}
 
-if [ -n "$KEEP_DELETED" ]; then
-	if [ -n "$MARKER_IS_SET" ]; then
-		export BRIDGE_KEEP_DELETED_MARKER="${KEEP_DELETED_MARKER}"
-	fi
-	if [ -n "${KEEP_DELETED_NOTICE:-}" ]; then
-		export BRIDGE_KEEP_DELETED_NOTICE="${KEEP_DELETED_NOTICE}"
-		if [ -n "${KEEP_DELETED_NOTICE_SIDE:-}" ]; then
-			export BRIDGE_KEEP_DELETED_NOTICE_SIDE="${KEEP_DELETED_NOTICE_SIDE}"
-		fi
-	fi
+if [ -n "$KEEP_DELETED" ] && [ -n "$MARKER_IS_SET" ]; then
+	export BRIDGE_KEEP_DELETED_MARKER="${KEEP_DELETED_MARKER}"
+fi
+
+# The notice is a bool whose default is derived inside the bridge, so it is
+# exported whenever it is set, independently of the mode — which is also where
+# it has no effect, since nothing is kept to reply to.
+NOTICE=$(printf '%s' "${KEEP_DELETED_NOTICE:-}" | tr '[:upper:]' '[:lower:]')
+case "$NOTICE" in
+	"") ;;
+	1 | true | yes | on) NOTICE=true ;;
+	0 | false | no | off) NOTICE=false ;;
+	*)
+		echo "keep-deleted: WARNING - unknown KEEP_DELETED_NOTICE '${KEEP_DELETED_NOTICE}', following KEEP_DELETED_MESSAGES" >&2
+		NOTICE=
+		;;
+esac
+if [ -n "$NOTICE" ]; then
+	export BRIDGE_KEEP_DELETED_NOTICE="$NOTICE"
 fi
 
 WATCH=${WATCH_URL:-}
@@ -226,9 +235,11 @@ if [ -n "$KEEP_DELETED" ]; then
 	else
 		echo "keep-deleted: marker ${BRIDGE_KEEP_DELETED_MARKER:-(bridge default)}" >&2
 	fi
-	if [ -n "${KEEP_DELETED_NOTICE:-}" ]; then
-		echo "keep-deleted: notice on the ${KEEP_DELETED_NOTICE_SIDE:-self} side" >&2
-	fi
+	case "$NOTICE" in
+		false) echo "keep-deleted: notice off" >&2 ;;
+		"") echo "keep-deleted: notice on (following KEEP_DELETED_MESSAGES)" >&2 ;;
+		*) echo "keep-deleted: notice on" >&2 ;;
+	esac
 fi
 
 # Print the generated config and exit — for testing, without starting anything.

@@ -57,7 +57,7 @@ BRIDGEV2_KEEP_DELETED_ANCHOR = re.compile(
 
 BRIDGEV2_KEEP_DELETED_GUARD = """{indent}// PATCH keep-deleted: mark the message instead of redacting it.
 {indent}if portal.shouldKeepDeleted(ctx, targetParts, source) {{
-{indent}\treturn portal.markRemovedMessageParts(ctx, targetParts, intent, source, getEventTS(evt))
+{indent}\treturn portal.markRemovedMessageParts(ctx, targetParts, intent, getEventTS(evt))
 {indent}}}
 """
 

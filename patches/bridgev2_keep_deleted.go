@@ -13,21 +13,23 @@
 //	self           keep only messages you sent; other people's still redact
 //	other          keep only other people's messages; your own still redact
 //
-// Three independent markers, each off when its variable is empty:
+// Two independent markers on a kept message:
 //
-//	BRIDGE_KEEP_DELETED_MARKER      reaction on the message (default 🗑️)
-//	BRIDGE_KEEP_DELETED_NOTICE      text of one m.notice replying to the message
-//	BRIDGE_KEEP_DELETED_NOTICE_SIDE whose side that notice appears on:
-//	                                "self" (default) or "sender"
+//	BRIDGE_KEEP_DELETED_MARKER  reaction on the message (default 🗑️), empty
+//	                            for none
+//	BRIDGE_KEEP_DELETED_NOTICE  bool; one bridge-bot m.notice replying to the
+//	                            message, saying who deleted it and when.
+//	                            Unset follows BRIDGE_KEEP_DELETED_MESSAGES
 //
-// With both empty the message is simply kept, silently. Nothing here is
-// ever relayed to the remote network: notices go out through intents, and
-// mautrix stamps double-puppeted events with fi.mau.double_puppet_source,
-// which Connector.shouldIgnoreEvent drops on the way back in.
+// With both off the message is simply kept, silently. Nothing here is ever
+// relayed to the remote network: markers go out through intents, and mautrix
+// stamps double-puppeted events with fi.mau.double_puppet_source, which
+// Connector.shouldIgnoreEvent drops on the way back in.
 package bridgev2
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -95,18 +97,28 @@ var keepDeletedMarker = func() string {
 	return v
 }()
 
-// keepDeletedNotice is the body of a single m.notice replying to the kept
-// message. Empty disables it.
-var keepDeletedNotice = os.Getenv("BRIDGE_KEEP_DELETED_NOTICE")
+// keepDeletedNotice turns on the deletion notice. Its default is derived from
+// the master switch — someone who asked for deletions to be kept wants to see
+// that one happened — but it is an independent bool, so either combination
+// can be asked for explicitly. Go initialises package variables in dependency
+// order, not source order, so reading keepDeletedMessages here is safe.
+//
+// As with the mode, an unparseable value falls back rather than failing, and
+// keepDeletedNoticeInvalid carries it to the call site to be logged.
+var keepDeletedNotice, keepDeletedNoticeInvalid = func() (bool, string) {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("BRIDGE_KEEP_DELETED_NOTICE")))
+	if raw == "" {
+		return keepDeletedMessages != keepDeletedOff, ""
+	}
+	if v, err := strconv.ParseBool(raw); err == nil {
+		return v, ""
+	}
+	return keepDeletedMessages != keepDeletedOff, raw
+}()
 
-// keepDeletedNoticeSide decides who that notice is sent as:
-//
-//	self   (default) your own Matrix user, so it renders on your side.
-//	               Requires double puppeting.
-//	sender         the party who deleted the message, so it renders on theirs.
-//
-// There is deliberately only one notice; picking a side is the whole choice.
-var keepDeletedNoticeSide = strings.ToLower(strings.TrimSpace(os.Getenv("BRIDGE_KEEP_DELETED_NOTICE_SIDE")))
+// keepDeletedNoticeTimeFormat is the datetime in the notice. Local time,
+// because the person reading it is the one running the bridge.
+const keepDeletedNoticeTimeFormat = "2006-01-02 15:04"
 
 // shouldKeepDeleted decides whether this particular deletion is kept. It is
 // the whole guard inserted at the call site, so an off switch costs one
@@ -167,7 +179,6 @@ func (portal *Portal) markRemovedMessageParts(
 	ctx context.Context,
 	parts []*database.Message,
 	intent MatrixAPI,
-	source *UserLogin,
 	ts time.Time,
 ) EventHandlingResult {
 	log := zerolog.Ctx(ctx)
@@ -213,24 +224,14 @@ func (portal *Portal) markRemovedMessageParts(
 		}
 	}
 
-	if keepDeletedNotice != "" {
-		attempted++
-		side := keepDeletedNoticeSide
-		if side != "self" && side != "sender" && side != "" {
+	if keepDeletedNotice {
+		if keepDeletedNoticeInvalid != "" {
 			log.Warn().
-				Str("configured_side", side).
-				Msg("Unknown BRIDGE_KEEP_DELETED_NOTICE_SIDE, falling back to self")
-			side = "self"
+				Str("configured_notice", keepDeletedNoticeInvalid).
+				Msg("Unknown BRIDGE_KEEP_DELETED_NOTICE, following BRIDGE_KEEP_DELETED_MESSAGES")
 		}
-		noticeIntent := intent
-		if side != "sender" {
-			side = "self"
-			noticeIntent = source.User.DoublePuppet(ctx)
-		}
-		if noticeIntent == nil {
-			failed++
-			log.Warn().Msg("Double puppeting unavailable, skipping keep-deleted notice")
-		} else if !portal.sendKeepDeletedNotice(ctx, noticeIntent, target, keepDeletedNotice, ts, side) {
+		attempted++
+		if !portal.sendKeepDeletedNotice(ctx, target, ts) {
 			failed++
 		}
 	}
@@ -242,40 +243,75 @@ func (portal *Portal) markRemovedMessageParts(
 	return EventHandlingResultSuccess
 }
 
-// sendKeepDeletedNotice posts one m.notice as a reply to the kept message.
-func (portal *Portal) sendKeepDeletedNotice(
-	ctx context.Context,
-	intent MatrixAPI,
-	target *database.Message,
-	body string,
-	ts time.Time,
-	kind string,
-) bool {
+// sendKeepDeletedNotice posts the deletion notice as a reply to the kept
+// message.
+//
+// The sender is the BRIDGE BOT, not a ghost and not the local user: Beeper
+// renders an m.notice from the bridge bot as dim centred text with no bubble,
+// in any room, which is exactly the weight a piece of bridge bookkeeping
+// should carry next to real messages. A ghost would get an ordinary bubble
+// and read like something the other person said.
+//
+// The body is plain text with no formatted_body, so a display name containing
+// HTML needs no escaping; the client never parses markdown in a plain body.
+func (portal *Portal) sendKeepDeletedNotice(ctx context.Context, target *database.Message, ts time.Time) bool {
 	log := zerolog.Ctx(ctx)
+	bot := portal.Bridge.Bot
+	if bot == nil {
+		log.Warn().Msg("No bridge bot intent, skipping keep-deleted notice")
+		return false
+	}
+	// Portals normally have the bot in them already, but a DM portal created
+	// before the bot was a functional member does not.
+	if err := bot.EnsureJoined(ctx, portal.MXID); err != nil {
+		log.Debug().Err(err).Msg("Failed to ensure the bridge bot is in the room for a keep-deleted notice")
+	}
 	content := &event.Content{
 		Parsed: &event.MessageEventContent{
 			MsgType: event.MsgNotice,
-			Body:    body,
+			Body: fmt.Sprintf(
+				"🗑️ %s deleted this message at %s",
+				portal.keepDeletedSenderName(ctx, target),
+				ts.Local().Format(keepDeletedNoticeTimeFormat),
+			),
 			RelatesTo: &event.RelatesTo{
 				InReplyTo: &event.InReplyTo{EventID: target.MXID},
 			},
 		},
 	}
-	// Same reasoning as the marker reaction: this bubble is a deletion, not
+	// Same reasoning as the marker reaction: this notice is a deletion, not
 	// a message someone typed.
 	WatchMarkKind(content, "deletion")
-	resp, err := intent.SendMessage(ctx, portal.MXID, event.EventMessage, content, &MatrixSendExtra{Timestamp: ts})
+	resp, err := bot.SendMessage(ctx, portal.MXID, event.EventMessage, content, &MatrixSendExtra{Timestamp: ts})
 	if err != nil {
 		log.Err(err).
-			Str("notice_kind", kind).
 			Stringer("event_id", target.MXID).
 			Msg("Failed to send keep-deleted notice")
 		return false
 	}
 	log.Debug().
-		Str("notice_kind", kind).
 		Stringer("event_id", target.MXID).
 		Stringer("notice_id", resp.EventID).
 		Msg("Sent keep-deleted notice")
 	return true
+}
+
+// keepDeletedSenderName names whoever the notice blames for the deletion.
+//
+// It is the message's SENDER rather than the party who issued the deletion,
+// for the same reason shouldKeepDeleted uses that side: on most networks only
+// the sender can delete, and where they differ the sender is the one whose
+// content went away. A ghost with no synced profile yet, or a message with no
+// sender recorded, falls back to a neutral word rather than an opaque ID.
+func (portal *Portal) keepDeletedSenderName(ctx context.Context, target *database.Message) string {
+	if target.SenderID == "" {
+		return "Someone"
+	}
+	ghost, err := portal.Bridge.GetGhostByID(ctx, target.SenderID)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to look up the sender for a keep-deleted notice")
+	} else if ghost != nil && ghost.Name != "" {
+		return ghost.Name
+	}
+	return "Someone"
 }

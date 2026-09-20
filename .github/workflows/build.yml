@@ -202,6 +202,15 @@ jobs:
             echo "$got" | grep -q "BRIDGE_KEEP_DELETED_MESSAGES=\"$mode\"" \
               || { echo "::error::keep-deleted mode $mode not passed through"; exit 1; }
           done
+          # The deletion notice is a bool that FOLLOWS the mode unless set, and
+          # it is exported rather than written into the config, so the startup
+          # log is what can be asserted on.
+          nd="$(docker run --rm -e GENERATE_ONLY=1 -e KEEP_DELETED_MESSAGES=other -e BRIDGES="beta:discord" "$IMG" 2>&1)"
+          echo "$nd" | grep -q 'keep-deleted: notice on (following KEEP_DELETED_MESSAGES)' \
+            || { echo "::error::keep-deleted notice did not default to the mode"; exit 1; }
+          nf="$(docker run --rm -e GENERATE_ONLY=1 -e KEEP_DELETED_MESSAGES=other -e KEEP_DELETED_NOTICE=no -e BRIDGES="beta:discord" "$IMG" 2>&1)"
+          echo "$nf" | grep -q 'keep-deleted: notice off' \
+            || { echo "::error::KEEP_DELETED_NOTICE=no not honoured"; exit 1; }
 
           # beeper-watch wiring: it selects the patched binary on its own, with
           # keep-deleted off, and must NOT switch keep-deleted on as a side

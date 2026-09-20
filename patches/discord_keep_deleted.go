@@ -3,15 +3,16 @@
 // mautrix-discord is still a bridgev1 bridge, so it has its own deletion path
 // (Portal.redactAllParts) rather than sharing bridgev2's. This file is the
 // Discord equivalent of patches/bridgev2_keep_deleted.go; the call site is
-// rewritten by patches/apply.py. Same modes (off/all/self/other), same three
-// independent markers, same variables, same semantics — see that file for the
-// details.
+// rewritten by patches/apply.py. Same modes (off/all/self/other), same two
+// markers, same variables, same semantics — see that file for the details.
 package main
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"maunium.net/go/mautrix/appservice"
 	"maunium.net/go/mautrix/event"
@@ -62,10 +63,20 @@ var keepDeletedMarker = func() string {
 	return v
 }()
 
-var keepDeletedNotice = os.Getenv("BRIDGE_KEEP_DELETED_NOTICE")
+// Bool, defaulting to whether deletions are kept at all. See the bridgev2
+// patch.
+var keepDeletedNotice, keepDeletedNoticeInvalid = func() (bool, string) {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("BRIDGE_KEEP_DELETED_NOTICE")))
+	if raw == "" {
+		return keepDeletedMessages != keepDeletedOff, ""
+	}
+	if v, err := strconv.ParseBool(raw); err == nil {
+		return v, ""
+	}
+	return keepDeletedMessages != keepDeletedOff, raw
+}()
 
-// "self" (default) or "sender" — see the bridgev2 patch for the rationale.
-var keepDeletedNoticeSide = strings.ToLower(strings.TrimSpace(os.Getenv("BRIDGE_KEEP_DELETED_NOTICE_SIDE")))
+const keepDeletedNoticeTimeFormat = "2006-01-02 15:04"
 
 // shouldKeepDeleted decides whether this particular deletion is kept; see the
 // bridgev2 patch for why the side is the message's sender rather than the
@@ -146,29 +157,13 @@ func (portal *Portal) markDeletedParts(intent *appservice.IntentAPI, parts []*da
 		}
 	}
 
-	if keepDeletedNotice != "" {
-		side := keepDeletedNoticeSide
-		if side != "self" && side != "sender" && side != "" {
+	if keepDeletedNotice {
+		if keepDeletedNoticeInvalid != "" {
 			portal.log.Warn().
-				Str("configured_side", side).
-				Msg("Unknown BRIDGE_KEEP_DELETED_NOTICE_SIDE, falling back to self")
-			side = "self"
+				Str("configured_notice", keepDeletedNoticeInvalid).
+				Msg("Unknown BRIDGE_KEEP_DELETED_NOTICE, following BRIDGE_KEEP_DELETED_MESSAGES")
 		}
-		noticeIntent := intent
-		if side != "sender" {
-			side = "self"
-			// The portal's receiver is the Discord ID of the user who owns it;
-			// guild channels have no receiver, so there is nobody to speak as.
-			noticeIntent = nil
-			if portal.Key.Receiver != "" {
-				if user := portal.bridge.GetUserByID(portal.Key.Receiver); user != nil {
-					noticeIntent = portal.bridge.GetPuppetByCustomMXID(user.MXID).CustomIntent()
-				}
-			}
-		}
-		if noticeIntent == nil {
-			portal.log.Warn().Msg("Double puppeting unavailable, skipping keep-deleted notice")
-		} else if evtID := portal.sendKeepDeletedNotice(noticeIntent, target, keepDeletedNotice, side); evtID != "" {
+		if evtID := portal.sendKeepDeletedNotice(target); evtID != "" {
 			lastResp = evtID
 		}
 	}
@@ -176,9 +171,28 @@ func (portal *Portal) markDeletedParts(intent *appservice.IntentAPI, parts []*da
 	return
 }
 
-// sendKeepDeletedNotice posts one m.notice as a reply to the kept message.
-func (portal *Portal) sendKeepDeletedNotice(intent *appservice.IntentAPI, target *database.Message, body, kind string) id.EventID {
-	resp, err := intent.SendMessageEvent(portal.MXID, event.EventMessage, &event.MessageEventContent{
+// sendKeepDeletedNotice posts the deletion notice as a reply to the kept
+// message, from the BRIDGE BOT — see the bridgev2 patch for why the bot and
+// not a ghost, and why the body carries no HTML.
+//
+// Discord has no deletion timestamp in the gateway event, so the notice is
+// stamped with the time the bridge saw it, which is within a second of it.
+func (portal *Portal) sendKeepDeletedNotice(target *database.Message) id.EventID {
+	bot := portal.bridge.Bot
+	if bot == nil {
+		portal.log.Warn().Msg("No bridge bot intent, skipping keep-deleted notice")
+		return ""
+	}
+	// Guild channels have the bot in them; a DM portal may not.
+	if err := bot.EnsureJoined(portal.MXID); err != nil {
+		portal.log.Debug().Err(err).Msg("Failed to ensure the bridge bot is in the room for a keep-deleted notice")
+	}
+	body := fmt.Sprintf(
+		"🗑️ %s deleted this message at %s",
+		portal.keepDeletedSenderName(target),
+		time.Now().Local().Format(keepDeletedNoticeTimeFormat),
+	)
+	resp, err := bot.SendMessageEvent(portal.MXID, event.EventMessage, &event.MessageEventContent{
 		MsgType: event.MsgNotice,
 		Body:    body,
 		RelatesTo: &event.RelatesTo{
@@ -187,15 +201,27 @@ func (portal *Portal) sendKeepDeletedNotice(intent *appservice.IntentAPI, target
 	})
 	if err != nil {
 		portal.log.Err(err).
-			Str("notice_kind", kind).
 			Str("event_id", target.MXID.String()).
 			Msg("Failed to send keep-deleted notice")
 		return ""
 	}
 	portal.log.Debug().
-		Str("notice_kind", kind).
 		Str("event_id", target.MXID.String()).
 		Str("notice_id", resp.EventID.String()).
 		Msg("Sent keep-deleted notice")
 	return resp.EventID
+}
+
+// keepDeletedSenderName names the sender of the deleted message.
+//
+// DB.Puppet.Get rather than bridge.GetPuppetByID, because the latter INSERTS a
+// puppet row for an unknown ID; a display name is not worth a write.
+func (portal *Portal) keepDeletedSenderName(target *database.Message) string {
+	if target.SenderID == "" {
+		return "Someone"
+	}
+	if puppet := portal.bridge.DB.Puppet.Get(target.SenderID); puppet != nil && puppet.Name != "" {
+		return puppet.Name
+	}
+	return "Someone"
 }

@@ -66,8 +66,7 @@ Every bridge is an appservice using a websocket to Beeper's server, so no ports 
 | `BRIDGE_STOP_WAIT_SECS` | `30` | supervisord `stopwaitsecs` |
 | `KEEP_DELETED_MESSAGES` | `off` | `off`/`all`/`self`/`other` — whose remotely deleted messages to keep and mark instead of redacting. See below |
 | `KEEP_DELETED_MARKER` | `🗑️` | Reaction used as the deletion marker. **Set it to empty for no reaction** |
-| `KEEP_DELETED_NOTICE` | unset | Fixed text for one notice replying to the kept message. Empty = off |
-| `KEEP_DELETED_NOTICE_SIDE` | `self` | Whose side that notice appears on: `self` or `sender` |
+| `KEEP_DELETED_NOTICE` | follows `KEEP_DELETED_MESSAGES` | Bool — one bridge-bot notice replying to the kept message, naming who deleted it and when |
 | `WATCH_URL` | unset | POST every bridged event to this URL, in plaintext. Empty = off. See below |
 | `WATCH_TOKEN` | unset | Bearer token for that endpoint |
 | `WATCH_OUTGOING` | `true` | `false` reports only what arrives from the network, not what you send |
@@ -148,37 +147,39 @@ prevent irreversible content loss and a typo must not cause any.
 
 ### The two markers
 
-Independent, and each is off when its value is empty. Either, both, or neither
-— with neither, the message is simply kept, silently.
+Independent. Either, both, or neither — with neither, the message is simply
+kept, silently.
 
 **A reaction on the message**, via `KEEP_DELETED_MARKER`. **Unset** means the
 default 🗑️; **set but empty** means no reaction at all.
 
-**One notice replying to the message**, via `KEEP_DELETED_NOTICE` (the text,
-fixed — no templating) and `KEEP_DELETED_NOTICE_SIDE`, which picks who it is
-sent as:
+**One notice replying to the message**, via `KEEP_DELETED_NOTICE`. The text is
+fixed, with no templating:
 
-| Side | Sent as | Renders |
-|---|---|---|
-| `self` (default) | your own Matrix user, via double puppeting | on your side |
-| `sender` | the party who deleted the message | on their side |
+```
+🗑️ Alice deleted this message at 2026-09-20 14:33
+```
 
-There is deliberately only one notice — picking a side is the whole choice. If
-`self` is asked for and double puppeting is unavailable, the notice is skipped
-with a warning. `KEEP_DELETED_NOTICE_SIDE` on its own, with no
-`KEEP_DELETED_NOTICE`, does nothing.
+It is sent by the **bridge bot** as an `m.notice`, which Beeper renders as dim
+centred text with no bubble — the weight a piece of bridge bookkeeping should
+have next to real messages. A ghost would get an ordinary bubble and read like
+something the other person said. The name is the **sender of the deleted
+message**, the same side `KEEP_DELETED_MESSAGES` reasons about; a ghost with no
+synced profile falls back to "Someone". The time is the deletion's timestamp,
+in the container's local time.
+
+`KEEP_DELETED_NOTICE` is a bool, and **unset it follows
+`KEEP_DELETED_MESSAGES`**: keeping deletions turns the notice on, `off` turns
+it off. Setting it explicitly overrides that either way — though with the mode
+`off` nothing is kept, so there is nothing to reply to and the notice never
+fires.
 
 ```yaml
 environment:
   KEEP_DELETED_MESSAGES: "all"
-  KEEP_DELETED_MARKER: ""                        # no reaction
-  KEEP_DELETED_NOTICE: "deleted this message"
-  KEEP_DELETED_NOTICE_SIDE: "sender"
+  KEEP_DELETED_MARKER: ""        # no reaction, notice only
+  KEEP_DELETED_NOTICE: "true"    # redundant here — "all" already implies it
 ```
-
-`KEEP_DELETED_NOTICE_SIDE` and `KEEP_DELETED_MESSAGES` both say "side" and mean
-different things: the first is who the notice is sent as, the second is whose
-messages are kept at all.
 
 **Nothing here reaches the remote network.** The other person sees no reaction
 and no notice; this is entirely a change to your own copy of the conversation.
